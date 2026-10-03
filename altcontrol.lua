@@ -3,13 +3,19 @@
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
-    Keeps the host -> managed account command model and the original command set.
+
+    SETUP:
+      MAIN / PC  = controller only (no executor required)
+      ALT / PHONE = executes this script and performs the commands
+
+    The script only accepts commands from HOST_USER_ID.
+    LocalPlayer is always the ALT running this script.
 ]]
 
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3"
+local VERSION = "3.1"
 
 local HOST_USER_ID = 3104567111
 local ACCOUNTS = {
@@ -28,8 +34,19 @@ local TweenService = game:GetService("TweenService")
 --// Runtime
 
 local startedAt = tick()
+-- LocalPlayer = the ALT on the phone executing this script.
+-- Host        = the MAIN on the PC controlling the alt through chat.
 local LocalPlayer = Players.LocalPlayer
 local Host = Players:GetPlayerByUserId(HOST_USER_ID)
+
+local function isManagedLocalAccount()
+    for _, userId in ipairs(ACCOUNTS) do
+        if LocalPlayer.UserId == userId then
+            return true
+        end
+    end
+    return false
+end
 
 local running = true
 local commands = {}
@@ -93,14 +110,16 @@ end
 local function getManagedBots()
     local bots = {}
 
+    -- A LocalScript/executor can directly control only the client it is running on.
+    -- Therefore this phone instance manages LocalPlayer when its UserId is listed
+    -- in ACCOUNTS. If you run the same script on another alt, that alt manages itself.
     for accountIndex, userId in ipairs(ACCOUNTS) do
-        local player = Players:GetPlayerByUserId(userId)
-
-        if player then
+        if LocalPlayer.UserId == userId then
             table.insert(bots, {
-                player = player,
+                player = LocalPlayer,
                 accountIndex = accountIndex,
             })
+            break
         end
     end
 
@@ -193,8 +212,29 @@ local function sendMessage(value)
 end
 
 local function sendEmote(emote)
-    -- Preserve the original behavior.
-    Players:Chat("/e " .. emote)
+    -- The ALT is the LocalPlayer on this phone, so the emote command is sent
+    -- from this client. The MAIN does not need to execute anything.
+    local command = "/e " .. tostring(emote)
+
+    if usingTextChatService() then
+        local channels = TextChatService:FindFirstChild("TextChannels")
+        local general = channels and channels:FindFirstChild("RBXGeneral")
+
+        if general then
+            local ok = pcall(function()
+                general:SendAsync(command)
+            end)
+
+            if ok then
+                return
+            end
+        end
+    end
+
+    -- Legacy/fallback behavior.
+    pcall(function()
+        Players:Chat(command)
+    end)
 end
 
 --// Commands
@@ -726,16 +766,28 @@ end
 
 --// Startup
 
-if Host then
+if LocalPlayer.UserId == HOST_USER_ID then
+    warn("[Account Manager] This script is meant to run on the ALT, not the MAIN.")
+elseif not isManagedLocalAccount() then
+    warn(
+        "[Account Manager] This alt is not listed in ACCOUNTS. Local UserId:",
+        LocalPlayer.UserId
+    )
+elseif Host then
     connectHostListener()
 
     sendMessage(
         "Account Manager v"
             .. VERSION
-            .. " modified by Rafa loaded in "
+            .. " modified by Rafa loaded on "
+            .. LocalPlayer.Name
+            .. " in "
             .. string.format("%.2f", tick() - startedAt)
             .. " seconds."
     )
 else
-    warn("[Account Manager] Host not found.")
+    warn(
+        "[Account Manager] MAIN/host is not currently visible in this server. Host UserId:",
+        HOST_USER_ID
+    )
 end
