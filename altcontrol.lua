@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.9
+    Account Manager v3.11
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.9"
+local VERSION = "3.11"
 local STAND_ANIMATION_ID = "138791542100078"
 local resolvedStandAnimationId = nil
 
@@ -499,7 +499,7 @@ addCommand({ "chattest", "ct" }, "Whisper a legacy-chat diagnostic back to the h
     local say = chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
 
     replyToHost(
-        "Chat=" .. tostring(TextChatService.ChatVersion)
+        "Chat=" .. tostring(TextChatService.ChatVersion) .. " | Listener=" .. (usingTextChatService() and "MessageReceived" or "Host.Chatted")
         .. " | Events=" .. tostring(chatEvents ~= nil)
         .. " | Filtered=" .. tostring(filtered ~= nil)
         .. " | Say=" .. tostring(say ~= nil)
@@ -943,7 +943,8 @@ addCommand({ "stand" }, "Float behind the host.", function()
         else
             warn("[Account Manager] Could not create smooth stand constraints.")
         end
-    end)
+    end
+end)
 
 addCommand({ "follow", "track", "watch" }, "Follow a player using pathfinding.", function(_, ...)
     local targetName = table.concat({ ... }, " ")
@@ -1088,7 +1089,16 @@ end
 
 --// Host Listener
 
+local hostChatConnection = nil
+
 local function connectHostListener()
+    if hostChatConnection then
+        pcall(function()
+            hostChatConnection:Disconnect()
+        end)
+        hostChatConnection = nil
+    end
+
     if usingTextChatService() then
         TextChatService.MessageReceived:Connect(function(chatMessage)
             local source = chatMessage.TextSource
@@ -1096,61 +1106,49 @@ local function connectHostListener()
                 return
             end
 
-            processCommand(chatMessage.Text)
-        end)
-        return
-    end
-
-    -- LegacyChatService:
-    -- OnMessageDoneFiltering is the most useful signal here because the alt
-    -- receives messages that are actually visible to it, including whispers.
-    local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-    local filteredEvent = chatEvents and chatEvents:FindFirstChild("OnMessageDoneFiltering")
-
-    if filteredEvent and filteredEvent:IsA("RemoteEvent") then
-        filteredEvent.OnClientEvent:Connect(function(messageData)
-            if type(messageData) ~= "table" then
-                return
-            end
-
-            local hostPlayer = refreshHost()
-            if not hostPlayer then
-                return
-            end
-
-            local fromSpeaker = tostring(messageData.FromSpeaker or "")
-            if string.lower(fromSpeaker) ~= string.lower(hostPlayer.Name) then
-                return
-            end
-
-            local messageText = tostring(messageData.Message or "")
-            if messageText:sub(1, #PREFIX) == PREFIX then
-                processCommand(messageText)
-            end
-        end)
-
-        print("[Account Manager] Legacy whisper listener connected.")
-        return
-    end
-
-    -- Compatibility fallback for games with a modified legacy chat system.
-    local hostPlayer = refreshHost()
-    if hostPlayer then
-        hostPlayer.Chatted:Connect(function(input)
-            if tostring(input):sub(1, #PREFIX) == PREFIX then
+            local input = tostring(chatMessage.Text or "")
+            if input:sub(1, #PREFIX) == PREFIX then
                 processCommand(input)
             end
         end)
-        warn("[Account Manager] Using Player.Chatted legacy fallback.")
-    else
-        warn("[Account Manager] Host is not present; legacy listener could not attach.")
+
+        print("[Account Manager] TextChatService host listener connected.")
+        return true
     end
+
+    -- LegacyChatService:
+    -- Host.Chatted was tested directly in this experience and receives
+    -- the host's public chat messages reliably.
+    local hostPlayer = refreshHost()
+    if not hostPlayer then
+        warn("[Account Manager] Host is not present; waiting for host to join.")
+        return false
+    end
+
+    hostChatConnection = hostPlayer.Chatted:Connect(function(input)
+        input = tostring(input or "")
+
+        if input:sub(1, #PREFIX) == PREFIX then
+            print("[Account Manager] Command from host:", input)
+            processCommand(input)
+        end
+    end)
+
+    print("[Account Manager] Legacy Host.Chatted listener connected to " .. hostPlayer.Name .. ".")
+    return true
 end
 
 -- Keep Host current if the main leaves/rejoins the same server.
 Players.PlayerAdded:Connect(function(player)
     if player.UserId == HOST_USER_ID then
         Host = player
+        print("[Account Manager] Host joined: " .. player.Name)
+
+        if not usingTextChatService() then
+            task.defer(function()
+                connectHostListener()
+            end)
+        end
     end
 end)
 
@@ -1180,7 +1178,8 @@ elseif not isManagedLocalAccount() then
 else
     -- TextChatService listener filters by HOST_USER_ID, so it can be connected
     -- even if the main has not fully appeared in Players at this exact instant.
-    connectHostListener()
+    local listenerConnected = connectHostListener()
+    print("[Account Manager] v" .. VERSION .. " startup complete | listener=" .. tostring(listenerConnected))
 
     local hostNow = refreshHost()
     if hostNow then
