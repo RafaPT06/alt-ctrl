@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.4"
+local VERSION = "3.5"
 local STAND_ANIMATION_ID = "138791542100078"
 local resolvedStandAnimationId = nil
 
@@ -170,10 +170,26 @@ local function getBotState(player)
             savedIdle2 = nil,
             savedIdleWeight1 = nil,
             savedIdleWeight2 = nil,
+            standObjects = nil,
         }
     end
 
     return botStates[userId]
+end
+
+local function cleanupStandConstraints(player)
+    local state = getBotState(player)
+
+    if state.standObjects then
+        for _, object in ipairs(state.standObjects) do
+            if object then
+                pcall(function()
+                    object:Destroy()
+                end)
+            end
+        end
+        state.standObjects = nil
+    end
 end
 
 local function restoreStandIdle(player)
@@ -230,6 +246,7 @@ local function stopBotMovement(player)
         state.standAnimationTrack = nil
     end
 
+    cleanupStandConstraints(player)
     restoreStandIdle(player)
 
     local humanoid = getHumanoid(player)
@@ -255,6 +272,7 @@ local function beginBotMode(player, mode, target)
         state.standAnimationTrack = nil
     end
 
+    cleanupStandConstraints(player)
     restoreStandIdle(player)
 
     -- Invalidates any old loop belonging to this bot.
@@ -776,30 +794,86 @@ addCommand({ "stand" }, "Float behind the host.", function()
             end
         end
 
-        task.spawn(function()
-            while isModeActive(bot, "stand", token) do
-                local hostRoot = getRoot(Host)
-                local botRoot = getRoot(bot)
+        -- Smooth stand: physics constraints continuously pull the alt to an
+        -- attachment behind the host instead of repeatedly teleporting it.
+        local botRoot = getRoot(bot)
+        local hostRoot = getRoot(Host)
 
-                if hostRoot and botRoot then
-                    -- Multiple accounts get spaced horizontally instead of
-                    -- occupying exactly the same position.
-                    local horizontal = (i - (#bots + 1) / 2) * 3
-                    local base = hostRoot.CFrame * CFrame.new(horizontal, 2, 5)
-                    local bob = math.sin(tick() * 2) * 0.5
-                    local position = base.Position + Vector3.new(0, bob, 0)
+        if botRoot and hostRoot then
+            local botAttachment = Instance.new("Attachment")
+            botAttachment.Name = "AccountManagerStandBot"
+            botAttachment.Parent = botRoot
 
-                    botRoot.CFrame = CFrame.lookAt(
-                        position,
-                        hostRoot.Position
-                    )
+            local targetAttachment = Instance.new("Attachment")
+            targetAttachment.Name = "AccountManagerStandTarget"
+            targetAttachment.Position = Vector3.new(0, 1.75, 5)
+            targetAttachment.Parent = hostRoot
+
+            local alignPosition = Instance.new("AlignPosition")
+            alignPosition.Name = "AccountManagerStandPosition"
+            alignPosition.Attachment0 = botAttachment
+            alignPosition.Attachment1 = targetAttachment
+            alignPosition.Mode = Enum.PositionAlignmentMode.TwoAttachment
+            alignPosition.ApplyAtCenterOfMass = true
+            alignPosition.MaxForce = 100000
+            alignPosition.MaxVelocity = 32
+            alignPosition.Responsiveness = 18
+            alignPosition.RigidityEnabled = false
+            alignPosition.Parent = botRoot
+
+            local alignOrientation = Instance.new("AlignOrientation")
+            alignOrientation.Name = "AccountManagerStandOrientation"
+            alignOrientation.Attachment0 = botAttachment
+            alignOrientation.Attachment1 = targetAttachment
+            alignOrientation.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+            alignOrientation.MaxTorque = 100000
+            alignOrientation.MaxAngularVelocity = 25
+            alignOrientation.Responsiveness = 14
+            alignOrientation.RigidityEnabled = false
+            alignOrientation.Parent = botRoot
+
+            state.standObjects = {
+                alignPosition,
+                alignOrientation,
+                botAttachment,
+                targetAttachment,
+            }
+
+            local h = getHumanoid(bot)
+            if h then
+                h.AutoRotate = false
+            end
+
+            task.spawn(function()
+                while isModeActive(bot, "stand", token) do
+                    local currentBotRoot = getRoot(bot)
+                    local currentHostRoot = getRoot(Host)
+
+                    -- Only teleport as emergency recovery if physics leaves the
+                    -- alt extremely far away. Normal following stays smooth.
+                    if currentBotRoot and currentHostRoot then
+                        local desired = currentHostRoot.CFrame * CFrame.new(0, 1.75, 5)
+                        if (currentBotRoot.Position - desired.Position).Magnitude > 45 then
+                            currentBotRoot.CFrame = desired
+                            currentBotRoot.AssemblyLinearVelocity = Vector3.zero
+                            currentBotRoot.AssemblyAngularVelocity = Vector3.zero
+                        end
+                    end
+
+                    task.wait(0.25)
                 end
 
-                task.wait(0.05)
-            end
-        end)
-    end
-end)
+                cleanupStandConstraints(bot)
+
+                local currentHumanoid = getHumanoid(bot)
+                if currentHumanoid then
+                    currentHumanoid.AutoRotate = true
+                end
+            end)
+        else
+            warn("[Account Manager] Could not create smooth stand constraints.")
+        end
+    end)
 
 addCommand({ "follow", "track", "watch" }, "Follow a player using pathfinding.", function(_, ...)
     local targetName = table.concat({ ... }, " ")
