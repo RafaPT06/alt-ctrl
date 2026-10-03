@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.11
+    Account Manager v3.12
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.11"
+local VERSION = "3.12"
 local STAND_ANIMATION_ID = "138791542100078"
 local resolvedStandAnimationId = nil
 
@@ -374,7 +374,6 @@ local function whisperHost(text)
             return false
         end
 
-        -- Prefer an already-created whisper channel.
         for _, channel in ipairs(channels:GetChildren()) do
             if channel:IsA("TextChannel") and string.find(channel.Name, "RBXWhisper") then
                 local name = channel.Name
@@ -400,27 +399,35 @@ local function whisperHost(text)
         return false
     end
 
-    -- LegacyChatService.
-    -- Players:Chat routes the text through Roblox's legacy chat command parser,
-    -- so /w is treated as a whisper rather than ordinary public text.
-    local ok = pcall(function()
+    -- LegacyChatService: send directly to the host's private channel.
+    -- Do this BEFORE Players:Chat because a successful pcall on Players:Chat
+    -- only proves the method did not error, not that Roblox delivered a whisper.
+    local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+    local sayRequest = chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
+
+    if sayRequest and sayRequest:IsA("RemoteEvent") then
+        local ok, err = pcall(function()
+            sayRequest:FireServer(text, "To " .. hostPlayer.Name)
+        end)
+
+        if ok then
+            print("[Account Manager] Private reply sent to " .. hostPlayer.Name)
+            return true
+        end
+
+        warn("[Account Manager] SayMessageRequest whisper failed:", err)
+    end
+
+    -- Last-resort fallback.
+    local ok, err = pcall(function()
         Players:Chat("/w " .. hostPlayer.Name .. " " .. text)
     end)
 
-    if ok then
-        return true
+    if not ok then
+        warn("[Account Manager] Players:Chat whisper fallback failed:", err)
     end
 
-    -- Fallback for legacy chat implementations that expose SayMessageRequest.
-    local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-    local sayRequest = chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
-    if sayRequest then
-        return pcall(function()
-            sayRequest:FireServer(text, "To " .. hostPlayer.Name)
-        end)
-    end
-
-    return false
+    return ok
 end
 
 local function replyToHost(text)
