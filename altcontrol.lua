@@ -15,11 +15,12 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.1"
+local VERSION = "3.2"
+local STAND_ANIMATION_ID = "138791542100078"
 
 local HOST_USER_ID = 3104567111
 local ACCOUNTS = {
-    9039839654,
+    5813623803,
 }
 
 --// Services
@@ -135,6 +136,7 @@ local function getBotState(player)
             token = 0,
             target = nil,
             defaultWalkSpeed = nil,
+            standAnimationTrack = nil,
         }
     end
 
@@ -147,6 +149,14 @@ local function stopBotMovement(player)
     state.token = state.token + 1
     state.mode = nil
     state.target = nil
+
+    if state.standAnimationTrack then
+        pcall(function()
+            state.standAnimationTrack:Stop(0.2)
+            state.standAnimationTrack:Destroy()
+        end)
+        state.standAnimationTrack = nil
+    end
 
     local humanoid = getHumanoid(player)
     if humanoid then
@@ -162,6 +172,14 @@ end
 
 local function beginBotMode(player, mode, target)
     local state = getBotState(player)
+
+    if state.standAnimationTrack then
+        pcall(function()
+            state.standAnimationTrack:Stop(0.2)
+            state.standAnimationTrack:Destroy()
+        end)
+        state.standAnimationTrack = nil
+    end
 
     -- Invalidates any old loop belonging to this bot.
     state.token = state.token + 1
@@ -237,6 +255,47 @@ local function sendEmote(emote)
     end)
 end
 
+local function whisperHost(text)
+    if not Host or not usingTextChatService() then
+        return false
+    end
+
+    local channels = TextChatService:FindFirstChild("TextChannels")
+    if not channels then
+        return false
+    end
+
+    -- First try an already-created whisper channel.
+    for _, channel in ipairs(channels:GetChildren()) do
+        if channel:IsA("TextChannel")
+            and string.find(channel.Name, "RBXWhisper", 1, true)
+            and string.find(channel.Name, tostring(HOST_USER_ID), 1, true)
+            and string.find(channel.Name, tostring(LocalPlayer.UserId), 1, true) then
+
+            local ok = pcall(function()
+                channel:SendAsync(tostring(text))
+            end)
+
+            if ok then
+                return true
+            end
+        end
+    end
+
+    -- Some experiences expose a whisper command through RBXGeneral instead
+    -- of pre-creating the channel. This asks Roblox's chat command system
+    -- to create/use the private conversation.
+    local general = channels:FindFirstChild("RBXGeneral")
+    if general then
+        local ok = pcall(function()
+            general:SendAsync("/w " .. Host.Name .. " " .. tostring(text))
+        end)
+        return ok
+    end
+
+    return false
+end
+
 --// Commands
 
 local function addCommand(names, description, callback)
@@ -264,6 +323,30 @@ local function addCommand(names, description, callback)
         end
     end
 end
+
+addCommand({ "help", "cmds", "commands" }, "Whisper the command list to the host.", function()
+    local lines = {
+        "=== Account Manager v" .. VERSION .. " ===",
+        ",bring | ,line <left/right/front/back>",
+        ",follow [player] | ,unfollow",
+        ",stand | ,standdown",
+        ",orbit [player] [speed] [radius] | ,unorbit",
+        ",ws <speed> | ,resetws",
+        ",dance [1/2/3] | ,undance",
+        ",wave | ,cheer | ,laugh | ,point",
+        ",applaud | ,shrug | ,emote <name>",
+        ",say <message> | ,reset | ,rejoin",
+        ",index | ,promo | ,meatballify | ,end",
+    }
+
+    for _, line in ipairs(lines) do
+        if not whisperHost(line) then
+            warn("[Account Manager] Could not whisper help to host.")
+            return
+        end
+        task.wait(0.15)
+    end
+end)
 
 addCommand({ "ex", "example", "debug" }, "Show command response time.", function()
     sendMessage(
@@ -575,6 +658,37 @@ addCommand({ "stand" }, "Float behind the host.", function()
     for i, entry in ipairs(bots) do
         local bot = entry.player
         local token = beginBotMode(bot, "stand", Host)
+
+        local humanoid = getHumanoid(bot)
+        local state = getBotState(bot)
+
+        if humanoid then
+            local animator = humanoid:FindFirstChildOfClass("Animator")
+            if not animator then
+                animator = Instance.new("Animator")
+                animator.Parent = humanoid
+            end
+
+            local animation = Instance.new("Animation")
+            animation.AnimationId = "rbxassetid://" .. STAND_ANIMATION_ID
+
+            local ok, track = pcall(function()
+                return animator:LoadAnimation(animation)
+            end)
+
+            animation:Destroy()
+
+            if ok and track then
+                track.Looped = true
+                track.Priority = Enum.AnimationPriority.Action
+                state.standAnimationTrack = track
+                pcall(function()
+                    track:Play(0.2)
+                end)
+            else
+                warn("[Account Manager] Could not load stand animation.")
+            end
+        end
 
         task.spawn(function()
             while isModeActive(bot, "stand", token) do
