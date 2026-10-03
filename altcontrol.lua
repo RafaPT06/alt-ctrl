@@ -15,8 +15,37 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.3"
+local VERSION = "3.4"
 local STAND_ANIMATION_ID = "138791542100078"
+local resolvedStandAnimationId = nil
+
+local function resolveCatalogAnimation(catalogId)
+    if resolvedStandAnimationId then
+        return resolvedStandAnimationId
+    end
+
+    local ok, objects = pcall(function()
+        return game:GetObjects("rbxassetid://" .. tostring(catalogId))
+    end)
+
+    if not ok or not objects or not objects[1] then
+        warn("[Account Manager] Could not resolve catalog animation:", catalogId)
+        return nil
+    end
+
+    local root = objects[1]
+    local animation = root:IsA("Animation") and root or root:FindFirstChildWhichIsA("Animation", true)
+
+    if animation and animation.AnimationId ~= "" then
+        resolvedStandAnimationId = animation.AnimationId
+        print("[Account Manager] Angel idle resolved to:", resolvedStandAnimationId)
+    else
+        warn("[Account Manager] Catalog item loaded, but no Animation object was found.")
+    end
+
+    pcall(function() root:Destroy() end)
+    return resolvedStandAnimationId
+end
 
 local HOST_USER_ID = 3104567111
 local ACCOUNTS = {
@@ -395,6 +424,14 @@ addCommand({ "help", "cmds", "commands" }, "Whisper the command list to the host
     end
 end)
 
+addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
+    local id = resolveCatalogAnimation(STAND_ANIMATION_ID)
+    if id then
+        print("[Account Manager] Angel actual animation:", id)
+        sendMessage("Angel actual animation: " .. tostring(id))
+    end
+end)
+
 addCommand({ "ex", "example", "debug" }, "Show command response time.", function()
     sendMessage(
         "Identified in "
@@ -708,62 +745,35 @@ addCommand({ "stand" }, "Float behind the host.", function()
 
         local humanoid = getHumanoid(bot)
         local state = getBotState(bot)
-        local character = bot.Character
-        local animate = character and character:FindFirstChild("Animate")
-        local idle = animate and animate:FindFirstChild("idle")
-        local animation1 = idle and idle:FindFirstChild("Animation1")
-        local animation2 = idle and idle:FindFirstChild("Animation2")
 
-        if humanoid and animate and animation1 then
-            state.savedIdle1 = animation1.AnimationId
+        if humanoid then
+            local actualAnimationId = resolveCatalogAnimation(STAND_ANIMATION_ID)
 
-            local weight1 = animation1:FindFirstChild("Weight")
-            if weight1 then
-                state.savedIdleWeight1 = weight1.Value
-            end
-
-            if animation2 then
-                state.savedIdle2 = animation2.AnimationId
-                local weight2 = animation2:FindFirstChild("Weight")
-                if weight2 then
-                    state.savedIdleWeight2 = weight2.Value
+            if actualAnimationId then
+                local animator = humanoid:FindFirstChildOfClass("Animator")
+                if not animator then
+                    animator = humanoid:WaitForChild("Animator", 3)
                 end
-            end
 
-            local standId = "rbxassetid://" .. STAND_ANIMATION_ID
-            animation1.AnimationId = standId
+                if animator then
+                    local animation = Instance.new("Animation")
+                    animation.AnimationId = actualAnimationId
 
-            if weight1 then
-                weight1.Value = 10
-            end
-
-            -- Use the same floating idle in both idle slots so Animate cannot
-            -- randomly choose the avatar's normal second idle.
-            if animation2 then
-                animation2.AnimationId = standId
-                local weight2 = animation2:FindFirstChild("Weight")
-                if weight2 then
-                    weight2.Value = 10
-                end
-            end
-
-            -- Stop current tracks and restart Animate so the new idle is picked up.
-            local animator = humanoid:FindFirstChildOfClass("Animator")
-            if animator then
-                for _, playingTrack in ipairs(animator:GetPlayingAnimationTracks()) do
-                    pcall(function()
-                        playingTrack:Stop(0.15)
+                    local ok, track = pcall(function()
+                        return animator:LoadAnimation(animation)
                     end)
+                    animation:Destroy()
+
+                    if ok and track then
+                        track.Looped = true
+                        track.Priority = Enum.AnimationPriority.Action
+                        state.standAnimationTrack = track
+                        track:Play(0.2, 1, 1)
+                    else
+                        warn("[Account Manager] Resolved Angel idle but Roblox refused it:", track)
+                    end
                 end
             end
-
-            pcall(function()
-                animate.Disabled = true
-                task.wait()
-                animate.Disabled = false
-            end)
-        else
-            warn("[Account Manager] Animate idle slots were not found on this character.")
         end
 
         task.spawn(function()
