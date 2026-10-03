@@ -1,617 +1,741 @@
-local dur = tick()
+--[[
+    Account Manager v3
+    Modified by Rafa
 
-local prefix = ","
-local commands, aliases = { }, { }
+    Clean rewrite of the original Account Manager.
+    Keeps the host -> managed account command model and the original command set.
+]]
 
-local ver = "2"
+--// Configuration
 
-local replicatedStorage = game:GetService("ReplicatedStorage")
-local textChat = game:GetService("TextChatService")
-local players = game:GetService("Players")
-local teleport = game:GetService("TeleportService")
-local pathfinding = game:GetService("PathfindingService")
-local tween = game:GetService("TweenService")
+local PREFIX = ","
+local VERSION = "3"
 
-local chatType = textChat.ChatVersion
-
-local accounts = {5813623803}
-
-local disallowed = false
-
-local host = 3104567111
-local model = players:GetPlayerByUserId(host)
-
-local localPlayer = players.LocalPlayer
-
-local states = {
-    ["track"] = false,
-    -- ["spam"] = false,
-    -- ["velocity"] = 0
+local HOST_USER_ID = 3104567111
+local ACCOUNTS = {
+    5813623803,
 }
 
-local function find(string)
-    if (string) == "me" or not (string) or (string) == nil then
-        return model
-    else
-        if not (string) then
-            return
+--// Services
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TextChatService = game:GetService("TextChatService")
+local TeleportService = game:GetService("TeleportService")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService = game:GetService("TweenService")
+
+--// Runtime
+
+local startedAt = tick()
+local LocalPlayer = Players.LocalPlayer
+local Host = Players:GetPlayerByUserId(HOST_USER_ID)
+
+local running = true
+local commands = {}
+local commandInfo = {}
+local botStates = {}
+
+--// Utilities
+
+local function getCharacter(player)
+    if not player then
+        return nil, nil, nil
+    end
+
+    local character = player.Character
+    if not character then
+        return nil, nil, nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    return character, humanoid, root
+end
+
+local function getRoot(player)
+    local _, _, root = getCharacter(player)
+    return root
+end
+
+local function getHumanoid(player)
+    local _, humanoid = getCharacter(player)
+    return humanoid
+end
+
+local function findPlayer(query)
+    if query == nil or query == "" or string.lower(query) == "me" then
+        return Host
+    end
+
+    query = string.lower(query)
+
+    -- Exact username/display-name match first.
+    for _, player in ipairs(Players:GetPlayers()) do
+        if string.lower(player.Name) == query
+            or string.lower(player.DisplayName) == query then
+            return player
         end
-    
-        local saved = {}
-    
-        for _,v in ipairs(players:GetPlayers()) do
-            if (string.lower(v.Name):match(string.lower(string))) or (string.lower(v.DisplayName):match(string.lower(string))) then
-                table.insert(saved, v)
+    end
+
+    -- Then partial username/display-name match.
+    for _, player in ipairs(Players:GetPlayers()) do
+        if string.find(string.lower(player.Name), query, 1, true)
+            or string.find(string.lower(player.DisplayName), query, 1, true) then
+            return player
+        end
+    end
+
+    return nil
+end
+
+local function getManagedBots()
+    local bots = {}
+
+    for accountIndex, userId in ipairs(ACCOUNTS) do
+        local player = Players:GetPlayerByUserId(userId)
+
+        if player then
+            table.insert(bots, {
+                player = player,
+                accountIndex = accountIndex,
+            })
+        end
+    end
+
+    return bots
+end
+
+local function getBotState(player)
+    local userId = player.UserId
+
+    if not botStates[userId] then
+        botStates[userId] = {
+            mode = nil,
+            token = 0,
+            target = nil,
+            defaultWalkSpeed = nil,
+        }
+    end
+
+    return botStates[userId]
+end
+
+local function stopBotMovement(player)
+    local state = getBotState(player)
+
+    state.token = state.token + 1
+    state.mode = nil
+    state.target = nil
+
+    local humanoid = getHumanoid(player)
+    if humanoid then
+        humanoid:Move(Vector3.zero)
+    end
+end
+
+local function stopAllMovement()
+    for _, entry in ipairs(getManagedBots()) do
+        stopBotMovement(entry.player)
+    end
+end
+
+local function beginBotMode(player, mode, target)
+    local state = getBotState(player)
+
+    -- Invalidates any old loop belonging to this bot.
+    state.token = state.token + 1
+    state.mode = mode
+    state.target = target
+
+    return state.token
+end
+
+local function isModeActive(player, mode, token)
+    local state = getBotState(player)
+
+    return running
+        and state.mode == mode
+        and state.token == token
+end
+
+--// Chat
+
+local function usingTextChatService()
+    return TextChatService.ChatVersion == Enum.ChatVersion.TextChatService
+end
+
+local function sendMessage(value)
+    local text = tostring(value)
+
+    if usingTextChatService() then
+        local channels = TextChatService:FindFirstChild("TextChannels")
+        local general = channels and channels:FindFirstChild("RBXGeneral")
+
+        if general then
+            local ok, err = pcall(function()
+                general:SendAsync(text)
+            end)
+
+            if not ok then
+                warn("[Account Manager] Failed to send chat message:", err)
             end
         end
-    
-        if (#saved) > (0) then
-            print(type(saved[1]))
-            return saved[1]
-        elseif (#saved) < (1) then
-            return nil
+    else
+        local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+        local sayRequest = chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
+
+        if sayRequest then
+            sayRequest:FireServer(text, "All")
         end
     end
 end
 
-local function index()
-    local found, indexes = { }, 1
-
-    for i,uID in ipairs(accounts) do
-        if players:GetPlayerByUserId(uID) then
-            found[indexes] = i
-            indexes = indexes + 1
-        end
-    end
-    return found
+local function sendEmote(emote)
+    -- Preserve the original behavior.
+    Players:Chat("/e " .. emote)
 end
 
-local add = function(aliases, functions)
-    for _,name in ipairs(aliases) do
-        if (type(name)) == "string" then
-            if not (commands[name]) and not (aliases[name]) then
-                commands[name] = {
-                    functions = functions,
-                    aliases = aliases
-                }
+--// Commands
+
+local function addCommand(names, description, callback)
+    assert(type(names) == "table", "Command names must be a table")
+    assert(type(callback) == "function", "Command callback must be a function")
+
+    local primary = names[1]
+
+    commandInfo[primary] = {
+        aliases = names,
+        description = description or "",
+    }
+
+    for _, name in ipairs(names) do
+        if type(name) ~= "string" then
+            warn("[Account Manager] Invalid alias type:", typeof(name))
+        else
+            name = string.lower(name)
+
+            if commands[name] then
+                warn("[Account Manager] Duplicate command alias:", name)
             else
-                aliases[name] = {
-                    functions = functions,
-                    aliases = aliases
-                }
+                commands[name] = callback
             end
-        else
-            print("Improper alias type: " .. type(name))
         end
     end
 end
 
-local version = function()
-    if (chatType) == Enum.ChatVersion.TextChatService then
-        return "New"
-    else
-        return "Legacy"
+addCommand({ "ex", "example", "debug" }, "Show command response time.", function()
+    sendMessage(
+        "Identified in "
+            .. string.format("%.2f", tick() - startedAt)
+            .. " seconds."
+    )
+end)
+
+addCommand({ "rejoin", "rj", "rej", "reconnect", "r" }, "Rejoin the current server.", function()
+    TeleportService:TeleportToPlaceInstance(
+        game.PlaceId,
+        game.JobId,
+        LocalPlayer
+    )
+end)
+
+addCommand({ "bring" }, "Bring managed accounts beside the host.", function()
+    local hostRoot = getRoot(Host)
+
+    if not hostRoot then
+        sendMessage("Host character is not ready.")
+        return
     end
-end
 
-local message = function(res)
-    if (version()) == "New" then
-        local textChannels = textChat.TextChannels
-        local RBX = textChannels.RBXGeneral
+    local bots = getManagedBots()
 
-        if (RBX) then
-            RBX:SendAsync(tostring(res))
-        end
-    else
-        local defaultChatSystemChatEvents = replicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-        local messageRequest = defaultChatSystemChatEvents:FindFirstChild("SayMessageRequest")
+    for i, entry in ipairs(bots) do
+        local bot = entry.player
+        local root = getRoot(bot)
 
-        messageRequest:FireServer(tostring(res), "All")
-    end
-end
+        if root then
+            stopBotMovement(bot)
 
-if (model) then
-    add({ "ex", "example", "debug" }, function()
-        message("Identified in " .. string.format("%.2f", tick() - dur) .. " seconds.")
-    end)
+            local x = (i - (#bots / 2) - 0.5) * 4
+            local destination = hostRoot.CFrame * CFrame.new(x, 0, 3)
 
-    add({ "rejoin", "rj", "rej", "reconnect", "r" }, function()
-        local gameId = game.PlaceId
-        local jobId = game.JobId
-
-        teleport:TeleportToPlaceInstance(gameId, jobId, localPlayer)
-    end)
-
-    add({ "bring" }, function()
-        local found = index()
-        for i, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if (bot) then
-                tween:Create(bot.Character.HumanoidRootPart, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {CFrame = model.Character.HumanoidRootPart.CFrame * CFrame.new((i - (#found / 2) - 0.5) * 4, 0, 3)}):Play()
-            end
-        end
-    end)
-
-    add({ "line" }, function(...)
-        local args = {...}
-        table.remove(args, 1)
-
-        local pos = table.concat(args, " ")
-
-        local found = index()
-        for i, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if (bot) then
-                if (pos) == "left" or (pos) == "l" then
-                    tween:Create(bot.Character.HumanoidRootPart, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {CFrame = model.Character.HumanoidRootPart.CFrame * CFrame.new(-index * 4, 0, 0)}):Play()
-                elseif (pos) == "right" or (pos) == "r" then
-                    tween:Create(bot.Character.HumanoidRootPart, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {CFrame = model.Character.HumanoidRootPart.CFrame * CFrame.new(index * 4, 0, 0)}):Play()
-                elseif (pos) == "back" or (pos) == "b" then
-                    tween:Create(bot.Character.HumanoidRootPart, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {CFrame = model.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, index * 4)}):Play()
-                elseif (pos) == "front" or (pos) == "f" then
-                    tween:Create(bot.Character.HumanoidRootPart, TweenInfo.new(0.25, Enum.EasingStyle.Sine), {CFrame = model.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, -index * 4)}):Play()
-                end
-            end
-        end
-    end)
-
-    -- add({ "spam", "chatspam" }, function(...)
-    --     states.spam = true
-    
-    --     local args = {...}
-    --     table.remove(args, 1)
-    
-    --     local found = index()
-    --     for i, index in ipairs(found) do
-    --         local bot = players:GetPlayerByUserId(accounts[index])
-    --         if (bot) then
-    --             coroutine.wrap(function()
-    --                 while (states.spam) do
-    --                     local curr = tick()
-    --                     local last = last[bot.UserId] or 0
-
-    --                     if (curr - last) >= 3.5 then
-    --                         message(table.concat(args, " "))
-    --                         last[bot.UserId] = curr
-    --                     end
-
-    --                     task.wait(0.1)
-    --                 end
-    --             end)()
-    --         end
-    --     end
-    -- end)
-    
-    -- Function to send a private message to the host
-    local function sendPrivateMessageToHost(messageText)
-        if model then
-            model:Kick(messageText)  -- This will kick the host, so change this to the desired method for private messaging
-            -- For actual private messaging, consider other ways such as using ReplicatedStorage events.
-        else
-            print("Host not found.")
+            TweenService:Create(
+                root,
+                TweenInfo.new(0.25, Enum.EasingStyle.Sine),
+                { CFrame = destination }
+            ):Play()
         end
     end
-    
-    -- Message function modification to send direct messages to the host if required
-    local message = function(res, isPrivate)
-        if isPrivate and model then
-            sendPrivateMessageToHost(res)  -- Sends private message to the host
-        elseif version() == "New" then
-            local textChannels = textChat.TextChannels
-            local RBX = textChannels.RBXGeneral
-    
-            if RBX then
-                RBX:SendAsync(tostring(res))
-            end
-        else
-            local defaultChatSystemChatEvents = replicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-            local messageRequest = defaultChatSystemChatEvents:FindFirstChild("SayMessageRequest")
-    
-            messageRequest:FireServer(tostring(res), "All")
-        end
+end)
+
+addCommand({ "line" }, "Line accounts left/right/front/back of the host.", function(_, ...)
+    local direction = string.lower(table.concat({ ... }, " "))
+    local hostRoot = getRoot(Host)
+
+    if not hostRoot then
+        sendMessage("Host character is not ready.")
+        return
     end
-    
-    -- Table to keep track of active orbit coroutines for each bot
-    local orbitCoroutines = {}
-    
-    -- Orbit command implementation
-    add({"orbit", "circle"}, function(...)
-        local args = {...}
-        table.remove(args, 1) -- Remove the command name from arguments
-        local targetName = args[1] -- The first argument is the target player's name
-        local speed = tonumber(args[2]) or 2 -- The second argument is the orbit speed (default to 2 if not specified)
-        local radius = tonumber(args[3]) or 5 -- The third argument is the orbit radius (default to 5 if not specified)
-            
-        local target = find(targetName)
-        if not target then
-            message("Target not found!")
-            return
-        end
-    
-        local targetHRP = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-        if not targetHRP then
-            message("Target's HumanoidRootPart not found.")
-            return
-        end
-    
-        local found = index()
-        for i, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if bot and bot.Character and bot.Character:FindFirstChild("HumanoidRootPart") then
-                local botHRP = bot.Character.HumanoidRootPart
-    
-                -- Stop any existing orbit coroutine for this bot
-                if orbitCoroutines[bot.UserId] then
-                    coroutine.close(orbitCoroutines[bot.UserId])
-                end
-    
-                -- Coroutine to handle the orbit movement
-                orbitCoroutines[bot.UserId] = coroutine.create(function()
-                    local angle = 0 -- Starting angle for the orbit
-                    local rotationSpeed = 2 -- Speed of the bot's rotation around its own axis
-    
-                    while true do
-                        if not targetHRP.Parent then break end -- Stop if the target character is gone
-    
-                        -- Calculate the new position for the bot based on the angle
-                        local x = targetHRP.Position.X + math.cos(angle) * radius
-                        local z = targetHRP.Position.Z + math.sin(angle) * radius
-                        local newPosition = Vector3.new(x, targetHRP.Position.Y, z)
-    
-                        -- Update bot's position and rotation
-                        botHRP.CFrame = CFrame.new(newPosition, targetHRP.Position) * CFrame.Angles(0, math.rad(angle * rotationSpeed), 0)
-    
-                        -- Increment angle to create the circular motion
-                        angle = angle + math.rad(speed)
-    
-                        task.wait(0.05) -- Adjust the wait time to change orbit smoothness
-                    end
-                end)
-    
-                -- Start the coroutine
-                coroutine.resume(orbitCoroutines[bot.UserId])
-            end
-        end
-    end)
 
+    if direction == "" then
+        sendMessage("Usage: " .. PREFIX .. "line <left/right/front/back>")
+        return
+    end
 
-    -- Unorbit command to stop the orbiting action
-    add({"unorbit", "stoporbit"}, function(...)
-        local found = index()
-        for _, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if bot and orbitCoroutines[bot.UserId] then
-                coroutine.close(orbitCoroutines[bot.UserId]) -- Stop the orbit coroutine
-                orbitCoroutines[bot.UserId] = nil
-            end
-        end
-    end)
-    
+    local bots = getManagedBots()
 
-    add({ "promo", "promote", "share", "brag", "advertise", "ad" }, function(...)
-        local args = {...}
-        table.remove(args, 1)
+    for i, entry in ipairs(bots) do
+        local bot = entry.player
+        local root = getRoot(bot)
 
-        local found = index()
-        for i, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if (bot) then
-                message("Account Manager version " .. ver .. " modified by Rafa")
-                break
-            end
-        end
-    end)
+        if root then
+            stopBotMovement(bot)
 
-    -- add({ "unspam", "stopspam", "nochatspam" }, function()
-    --     states.spam = false
-    -- end)
-    
-    add({ "index", "ingame", "online" }, function()
-        local count = 0
-        for _,uID in ipairs(accounts) do
-            if players:GetPlayerByUserId(uID) then
-                count = count + 1
-            end
-        end
-        message("Managing " .. count .. " accounts.")
-    end)
+            local offset
 
-    add({ "meatballify", "meatball", "gwibard" }, function()
-        loadstring(game:HttpGetAsync("https://new-cloudbin.koyeb.app/raw/eTNvTLkf.txt", true))()
-    end)
-
-    add({ "end", "stop", "quit", "exit", "close" }, function()
-        disallowed = true
-
-        message("Account Manager successfully closed.")
-    end)
-
-    add({ "dance", "groove" }, function(...)
-        local args = {...}
-        table.remove(args, 1)
-
-        local dance = table.concat(args, " ")
-
-        if (dance) == "1" then
-            players:Chat("/e dance")
-        else
-            players:Chat("/e dance" .. dance)
-        end
-    end)
-
-    add({ "wave", "hello" }, function()
-        players:Chat("/e wave")
-    end)
-
-    add({ "cheer", "hooray" }, function()
-        players:Chat("/e cheer")
-    end)
-
-    add({ "applaud", "clap" }, function()
-        players:Chat("/e applaud")
-    end)
-
-    add({ "shrug", "idk", "confused" }, function()
-        players:Chat("/e shrug")
-    end)
-
-    add({ "point", "pointout", "punch" }, function()
-        players:Chat("/e point")
-    end)
-
-    add({ "laugh", "excite", "lol" }, function()
-        players:Chat("/e laugh")
-    end)
-
-    add({ "emote", "e" }, function(...)
-        local args = {...}
-        table.remove(args, 1)
-
-        local emote = table.concat(args, " ")
-
-        players:Chat("/e " .. emote)
-    end)
-
-    add({ "reset", "kill", "oof", "die" }, function()
-        local found = index()
-        for _,index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if (bot) then
-                bot.Character.Humanoid.Health = 0
-            end
-        end
-    end)
-    
-    add({ "say", "chat", "message", "msg", "announce" }, function(...)
-        local args = {...}
-        table.remove(args, 1)
-
-        local found = index()
-        for _,index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if (bot) then
-                message(table.concat(args, " "))
-                break
-            end
-        end
-    end)
-    
-    -- Table to track the original walkspeed of each bot for resetting purposes
-    local defaultWalkSpeeds = {}
-    
-    -- WalkSpeed Command Implementation
-    add({"ws", "walkspeed"}, function(...)
-        local args = {...}
-        table.remove(args, 1) -- Remove the command name from arguments
-        local speed = tonumber(args[1]) -- Convert the speed input to a number
-    
-        -- Validate the speed input
-        if not speed or speed <= 0 then
-            message("Please provide a valid positive number for speed.")
-            return
-        end
-    
-        -- Retrieve the bots you want to set the walk speed for
-        local found = index()
-        for _, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if bot and bot.Character then
-                local humanoid = bot.Character:FindFirstChildOfClass("Humanoid")
-    
-                if humanoid then
-                    -- Save the original walk speed if not already saved
-                    if not defaultWalkSpeeds[bot.UserId] then
-                        defaultWalkSpeeds[bot.UserId] = humanoid.WalkSpeed
-                    end
-    
-                    -- Set the new walk speed
-                    humanoid.WalkSpeed = speed
-                    message(bot.Name .. "'s walk speed set to " .. speed .. ".")
-                else
-                    message(bot.Name .. " does not have a humanoid.")
-                end
-            end
-        end
-    end)
-    
-    -- Reset WalkSpeed Command to reset the walk speed to default values
-    add({"resetws", "defaultws"}, function()
-        local found = index()
-        for _, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if bot and bot.Character then
-                local humanoid = bot.Character:FindFirstChildOfClass("Humanoid")
-    
-                if humanoid and defaultWalkSpeeds[bot.UserId] then
-                    -- Reset to the original walk speed
-                    humanoid.WalkSpeed = defaultWalkSpeeds[bot.UserId]
-                    message(bot.Name .. "'s walk speed reset to default.")
-                else
-                    message("Cannot reset walk speed for " .. bot.Name)
-                end
-            end
-        end
-    end)
-
-  -- Command to make the bot float behind the host without walking or constant teleporting
-    add({ "stand" }, function()
-        print("Stand command received") -- Debugging statement
-        states.track = true  -- Enable tracking state
-    
-        local found = index()
-        if #found == 0 then
-            message("No accounts available to stand.") -- If no accounts are found
-            print("No accounts found") -- Debugging statement
-            return
-        end
-    
-        print("Standing and floating behind the host") -- Debugging statement
-    
-        for i, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if bot and bot.Character and bot.Character.HumanoidRootPart then
-                coroutine.wrap(function()
-                    local lastPos = nil -- Variable to track the last known position of the player
-                    while states.track do
-                        -- Calculate position behind the host
-                        local hostPos = model.Character.HumanoidRootPart.CFrame
-                        local behindOffset = CFrame.new(0, 2, -5) -- Fixed position: 5 studs behind and 2 studs above
-    
-                        -- Add a floating/bobbing effect (slight vertical movement)
-                        local bobbingOffset = Vector3.new(0, math.sin(tick() * 2) * 0.5, 0)
-    
-                        -- Get the current player position
-                        local newPos = (hostPos * behindOffset).Position
-    
-                        -- Move the bot only if the player has moved a noticeable distance
-                        if not lastPos or (newPos - lastPos).magnitude > 0.5 then
-                            -- Set the bot's position with the floating effect
-                            bot.Character.HumanoidRootPart.CFrame = CFrame.new(newPos + bobbingOffset)
-                            lastPos = newPos -- Update the last known position
-                        end
-    
-                        task.wait(0.1)  -- Small delay to make updates smooth
-                    end
-                end)()
+            if direction == "left" or direction == "l" then
+                offset = CFrame.new(-i * 4, 0, 0)
+            elseif direction == "right" or direction == "r" then
+                offset = CFrame.new(i * 4, 0, 0)
+            elseif direction == "back" or direction == "b" then
+                offset = CFrame.new(0, 0, i * 4)
+            elseif direction == "front" or direction == "f" then
+                offset = CFrame.new(0, 0, -i * 4)
             else
-                message("Bot or target character is missing necessary parts.") -- Notify if there are missing components
-                print("Bot or target humanoid root part missing") -- Debugging statement
+                sendMessage("Unknown line direction: " .. direction)
+                return
             end
+
+            TweenService:Create(
+                root,
+                TweenInfo.new(0.25, Enum.EasingStyle.Sine),
+                { CFrame = hostRoot.CFrame * offset }
+            ):Play()
         end
+    end
+end)
+
+addCommand({ "orbit", "circle" }, "Orbit a player. Usage: ,orbit player [speed] [radius]", function(_, targetName, speedArg, radiusArg)
+    local target = findPlayer(targetName)
+    local speed = tonumber(speedArg) or 2
+    local radius = tonumber(radiusArg) or 5
+
+    if not target then
+        sendMessage("Target not found.")
+        return
+    end
+
+    if radius <= 0 then
+        sendMessage("Radius must be greater than 0.")
+        return
+    end
+
+    local bots = getManagedBots()
+
+    for i, entry in ipairs(bots) do
+        local bot = entry.player
+        local token = beginBotMode(bot, "orbit", target)
+
+        task.spawn(function()
+            -- Spread multiple accounts around the circle.
+            local angle = ((i - 1) / math.max(#bots, 1)) * math.pi * 2
+
+            while isModeActive(bot, "orbit", token) do
+                local targetRoot = getRoot(target)
+                local botRoot = getRoot(bot)
+
+                if targetRoot and botRoot then
+                    local x = math.cos(angle) * radius
+                    local z = math.sin(angle) * radius
+                    local destination = targetRoot.Position + Vector3.new(x, 0, z)
+
+                    botRoot.CFrame = CFrame.lookAt(
+                        destination,
+                        targetRoot.Position
+                    )
+
+                    angle = angle + math.rad(speed)
+                end
+
+                task.wait(0.05)
+            end
+        end)
+    end
+end)
+
+addCommand({ "unorbit", "stoporbit" }, "Stop orbiting.", function()
+    for _, entry in ipairs(getManagedBots()) do
+        local state = getBotState(entry.player)
+
+        if state.mode == "orbit" then
+            stopBotMovement(entry.player)
+        end
+    end
+end)
+
+addCommand({ "promo", "promote", "share", "brag", "advertise", "ad" }, "Show Account Manager version.", function()
+    if #getManagedBots() > 0 then
+        sendMessage("Account Manager version " .. VERSION .. " modified by Rafa")
+    end
+end)
+
+addCommand({ "index", "ingame", "online" }, "Show number of managed accounts online.", function()
+    sendMessage("Managing " .. #getManagedBots() .. " accounts.")
+end)
+
+addCommand({ "meatballify", "meatball", "gwibard" }, "Run the existing meatballify script.", function()
+    local ok, err = pcall(function()
+        loadstring(
+            game:HttpGetAsync(
+                "https://new-cloudbin.koyeb.app/raw/eTNvTLkf.txt",
+                true
+            )
+        )()
     end)
-    
-    -- Follow player Command to follow the player
-    add({ "follow", "track", "watch" }, function(...)
-        print("Follow command received") -- Debugging statement
-        states.track = true
-    
-        local args = {...}
-        table.remove(args, 1)
-    
-        local target = find(tostring(table.concat(args, " ")))
-        
-        if not target then
-            message("Target not found.") -- Notify if the target isn't found
-            print("Target not found") -- Debugging statement
-            return
+
+    if not ok then
+        warn("[Account Manager] meatballify failed:", err)
+        sendMessage("Meatballify failed to load.")
+    end
+end)
+
+addCommand({ "end", "stop", "quit", "exit", "close" }, "Disable Account Manager commands.", function()
+    stopAllMovement()
+    running = false
+    sendMessage("Account Manager successfully closed.")
+end)
+
+addCommand({ "dance", "groove" }, "Dance. Usage: ,dance [1/2/3]", function(_, dance)
+    dance = tostring(dance or "1")
+
+    if dance == "1" then
+        sendEmote("dance")
+    else
+        sendEmote("dance" .. dance)
+    end
+end)
+
+addCommand({ "wave", "hello" }, "Wave.", function()
+    sendEmote("wave")
+end)
+
+addCommand({ "cheer", "hooray" }, "Cheer.", function()
+    sendEmote("cheer")
+end)
+
+addCommand({ "applaud", "clap" }, "Applaud.", function()
+    sendEmote("applaud")
+end)
+
+addCommand({ "shrug", "idk", "confused" }, "Shrug.", function()
+    sendEmote("shrug")
+end)
+
+addCommand({ "point", "pointout", "punch" }, "Point.", function()
+    sendEmote("point")
+end)
+
+addCommand({ "laugh", "excite", "lol" }, "Laugh.", function()
+    sendEmote("laugh")
+end)
+
+addCommand({ "emote", "e" }, "Run an emote.", function(_, ...)
+    local emote = table.concat({ ... }, " ")
+
+    if emote == "" then
+        sendMessage("Usage: " .. PREFIX .. "emote <name>")
+        return
+    end
+
+    sendEmote(emote)
+end)
+
+addCommand({ "reset", "kill", "oof", "die" }, "Reset managed accounts.", function()
+    for _, entry in ipairs(getManagedBots()) do
+        local bot = entry.player
+        local humanoid = getHumanoid(bot)
+
+        stopBotMovement(bot)
+
+        if humanoid then
+            humanoid.Health = 0
         end
-    
-        local found = index()
-        if #found == 0 then
-            message("No accounts available to follow.") -- If no accounts are found
-            print("No accounts found") -- Debugging statement
-            return
+    end
+end)
+
+addCommand({ "say", "chat", "message", "msg", "announce" }, "Send a chat message.", function(_, ...)
+    if #getManagedBots() == 0 then
+        return
+    end
+
+    local text = table.concat({ ... }, " ")
+
+    if text ~= "" then
+        sendMessage(text)
+    end
+end)
+
+addCommand({ "ws", "walkspeed" }, "Set managed account WalkSpeed.", function(_, speedArg)
+    local speed = tonumber(speedArg)
+
+    if not speed or speed <= 0 then
+        sendMessage("Please provide a valid positive number for speed.")
+        return
+    end
+
+    for _, entry in ipairs(getManagedBots()) do
+        local bot = entry.player
+        local humanoid = getHumanoid(bot)
+
+        if humanoid then
+            local state = getBotState(bot)
+
+            if state.defaultWalkSpeed == nil then
+                state.defaultWalkSpeed = humanoid.WalkSpeed
+            end
+
+            humanoid.WalkSpeed = speed
+            sendMessage(bot.Name .. "'s walk speed set to " .. speed .. ".")
+        else
+            sendMessage(bot.Name .. " does not have a humanoid.")
         end
-    
-        print("Following target:", target.Name) -- Debugging statement
-    
-        for _, index in ipairs(found) do
-            local bot = players:GetPlayerByUserId(accounts[index])
-            if bot and bot.Character and bot.Character.HumanoidRootPart then
-                coroutine.wrap(function()
-                    while states.track do
-                        -- Recalculate path frequently based on current position
-                        local path = pathfinding:CreatePath()
-                        path:ComputeAsync(bot.Character.HumanoidRootPart.Position, target.Character.HumanoidRootPart.Position)
-    
-                        local waypoints = path:GetWaypoints()
-                        if not waypoints or #waypoints == 0 then
-                            message("No waypoints found for path.") -- Notify if no path is generated
-                            print("No waypoints generated") -- Debugging statement
-                            break
-                        end
-    
-                        -- Iterate through the waypoints and dynamically update the path
-                        for _, waypoint in ipairs(waypoints) do
-                            if not states.track then break end -- Exit if tracking is stopped
-                            
-                            -- Recheck target's position before moving
-                            if (target.Character and target.Character.HumanoidRootPart) then
-                                -- Compute the path again to update the target's latest position
-                                path:ComputeAsync(bot.Character.HumanoidRootPart.Position, target.Character.HumanoidRootPart.Position)
-                                waypoints = path:GetWaypoints()
+    end
+end)
+
+addCommand({ "resetws", "defaultws" }, "Restore saved WalkSpeed.", function()
+    for _, entry in ipairs(getManagedBots()) do
+        local bot = entry.player
+        local humanoid = getHumanoid(bot)
+        local state = getBotState(bot)
+
+        if humanoid and state.defaultWalkSpeed ~= nil then
+            humanoid.WalkSpeed = state.defaultWalkSpeed
+            sendMessage(bot.Name .. "'s walk speed reset to default.")
+        else
+            sendMessage("Cannot reset walk speed for " .. bot.Name .. ".")
+        end
+    end
+end)
+
+addCommand({ "stand" }, "Float behind the host.", function()
+    if not getRoot(Host) then
+        sendMessage("Host character is not ready.")
+        return
+    end
+
+    local bots = getManagedBots()
+
+    if #bots == 0 then
+        sendMessage("No accounts available to stand.")
+        return
+    end
+
+    for i, entry in ipairs(bots) do
+        local bot = entry.player
+        local token = beginBotMode(bot, "stand", Host)
+
+        task.spawn(function()
+            while isModeActive(bot, "stand", token) do
+                local hostRoot = getRoot(Host)
+                local botRoot = getRoot(bot)
+
+                if hostRoot and botRoot then
+                    -- Multiple accounts get spaced horizontally instead of
+                    -- occupying exactly the same position.
+                    local horizontal = (i - (#bots + 1) / 2) * 3
+                    local base = hostRoot.CFrame * CFrame.new(horizontal, 2, 5)
+                    local bob = math.sin(tick() * 2) * 0.5
+                    local position = base.Position + Vector3.new(0, bob, 0)
+
+                    botRoot.CFrame = CFrame.lookAt(
+                        position,
+                        hostRoot.Position
+                    )
+                end
+
+                task.wait(0.05)
+            end
+        end)
+    end
+end)
+
+addCommand({ "follow", "track", "watch" }, "Follow a player using pathfinding.", function(_, ...)
+    local targetName = table.concat({ ... }, " ")
+    local target = findPlayer(targetName)
+
+    if not target then
+        sendMessage("Target not found.")
+        return
+    end
+
+    local bots = getManagedBots()
+
+    if #bots == 0 then
+        sendMessage("No accounts available to follow.")
+        return
+    end
+
+    for _, entry in ipairs(bots) do
+        local bot = entry.player
+        local token = beginBotMode(bot, "follow", target)
+
+        task.spawn(function()
+            while isModeActive(bot, "follow", token) do
+                local botRoot = getRoot(bot)
+                local humanoid = getHumanoid(bot)
+                local targetRoot = getRoot(target)
+
+                if botRoot and humanoid and targetRoot then
+                    local distance = (targetRoot.Position - botRoot.Position).Magnitude
+
+                    -- Avoid constantly pathfinding while already close.
+                    if distance > 5 then
+                        local path = PathfindingService:CreatePath({
+                            AgentCanJump = true,
+                        })
+
+                        local ok = pcall(function()
+                            path:ComputeAsync(
+                                botRoot.Position,
+                                targetRoot.Position
+                            )
+                        end)
+
+                        if ok and path.Status == Enum.PathStatus.Success then
+                            local waypoints = path:GetWaypoints()
+
+                            -- Move only toward the next useful waypoint.
+                            -- The loop then recalculates for the moving target.
+                            local waypoint = waypoints[2] or waypoints[1]
+
+                            if waypoint then
+                                if waypoint.Action == Enum.PathWaypointAction.Jump then
+                                    humanoid.Jump = true
+                                end
+
+                                humanoid:MoveTo(waypoint.Position)
                             end
-                            
-                            bot.Character.Humanoid:MoveTo(waypoint.Position)
-                            bot.Character.Humanoid.MoveToFinished:Wait()
+                        else
+                            -- Simple fallback when pathfinding cannot produce a path.
+                            humanoid:MoveTo(targetRoot.Position)
                         end
+                    else
+                        humanoid:MoveTo(botRoot.Position)
                     end
-                end)()
-            else
-                message("Bot or target character is missing necessary parts.") -- Notify if there are missing components
-                print("Bot or target humanoid root part missing") -- Debugging statement
-            end
-        end
-    end)
-    
-    -- Command to make the bot stop tracking or standing
-    add({ "unfollow", "untrack", "unwatch", "standdown" }, function()
-        states.track = false
-        print("Tracking stopped") -- Debugging statement
-    end)
-
-    
-    add({ "undance", "nodance", "nd", "stopdance" }, function()
-        localPlayer.Character.Humanoid.Jump = true
-    end)
-
-    local response = function(input: string)
-        if not (disallowed) then
-            dur = tick()
-
-            if (string.sub(input, 1, #prefix)) == prefix then
-                local command = string.sub(input, #prefix + 1)
-                local args = { }
-    
-                for arg in string.gmatch(command, "%S+") do
-                    table.insert(args, arg)
                 end
-    
-                local functions = commands[args[1]]
-                if (functions) then
-                    functions.functions(unpack(args))
-                else
-                    message('Command "' .. command .. '" not found.')
-                end
+
+                task.wait(0.25)
             end
+        end)
+    end
+end)
+
+addCommand({ "unfollow", "untrack", "unwatch", "standdown" }, "Stop follow/stand movement.", function()
+    for _, entry in ipairs(getManagedBots()) do
+        local state = getBotState(entry.player)
+
+        if state.mode == "follow" or state.mode == "stand" then
+            stopBotMovement(entry.player)
         end
     end
+end)
 
-    if (version()) == "New" then
-        textChat.MessageReceived:Connect(function(textChatMessage)
-            local author = tostring(textChatMessage.TextSource)
+addCommand({ "undance", "nodance", "nd", "stopdance" }, "Stop the current emote.", function()
+    local humanoid = getHumanoid(LocalPlayer)
 
-            if (author) == model.Name then
-                response(textChatMessage.Text)
+    if humanoid then
+        humanoid.Jump = true
+    end
+end)
+
+--// Parser
+
+local function parseArguments(text)
+    local args = {}
+
+    for argument in string.gmatch(text, "%S+") do
+        table.insert(args, argument)
+    end
+
+    return args
+end
+
+local function processCommand(input)
+    if not running or type(input) ~= "string" then
+        return
+    end
+
+    if string.sub(input, 1, #PREFIX) ~= PREFIX then
+        return
+    end
+
+    startedAt = tick()
+
+    local body = string.sub(input, #PREFIX + 1)
+    local args = parseArguments(body)
+
+    if #args == 0 then
+        return
+    end
+
+    local commandName = string.lower(args[1])
+    local callback = commands[commandName]
+
+    if not callback then
+        sendMessage('Command "' .. commandName .. '" not found.')
+        return
+    end
+
+    local ok, err = pcall(function()
+        callback(unpack(args))
+    end)
+
+    if not ok then
+        warn(
+            "[Account Manager] Command failed:",
+            commandName,
+            err
+        )
+        sendMessage('Command "' .. commandName .. '" failed.')
+    end
+end
+
+--// Host Listener
+
+local function connectHostListener()
+    if usingTextChatService() then
+        TextChatService.MessageReceived:Connect(function(chatMessage)
+            if not running then
+                return
+            end
+
+            local source = chatMessage.TextSource
+
+            if source and source.UserId == HOST_USER_ID then
+                processCommand(chatMessage.Text)
             end
         end)
     else
-        model.Chatted:Connect(function(input: string)
-            response(input)
+        Host.Chatted:Connect(function(input)
+            processCommand(input)
         end)
     end
-    --message("testing stand")
-    message("Account Manager modified by Rafa loaded in " .. string.format("%.2f", tick() - dur) .. " seconds.")
+end
+
+--// Startup
+
+if Host then
+    connectHostListener()
+
+    sendMessage(
+        "Account Manager v"
+            .. VERSION
+            .. " modified by Rafa loaded in "
+            .. string.format("%.2f", tick() - startedAt)
+            .. " seconds."
+    )
 else
-    message("Host not found, cannot use Account Manager.")
+    warn("[Account Manager] Host not found.")
 end
