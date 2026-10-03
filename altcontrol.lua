@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.7
+    Account Manager v3.8
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.7"
+local VERSION = "3.8"
 local STAND_ANIMATION_ID = "138791542100078"
 local resolvedStandAnimationId = nil
 
@@ -86,6 +86,12 @@ end
 local running = true
 local commands = {}
 local commandInfo = {}
+
+-- Executor/Luau compatibility: some environments do not expose the old
+-- global unpack(), which otherwise makes every command fail with
+-- "attempt to call a nil value".
+local unpackArgs = table.unpack or unpack
+
 local botStates = {}
 
 --// Utilities
@@ -1032,7 +1038,7 @@ local function processCommand(input)
     end
 
     local ok, err = pcall(function()
-        callback(unpack(args))
+        callback(unpackArgs(args))
     end)
 
     if not ok then
@@ -1041,7 +1047,7 @@ local function processCommand(input)
             commandName,
             err
         )
-        replyToHost('Command "' .. commandName .. '" failed.')
+        replyToHost('Command "' .. commandName .. '" failed: ' .. tostring(err))
     end
 end
 
@@ -1090,6 +1096,11 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 --// Startup
+
+if type(unpackArgs) ~= "function" then
+    error("[Account Manager] No table.unpack/unpack implementation is available.")
+end
+
 
 if LocalPlayer.UserId == HOST_USER_ID then
     warn("[Account Manager] This script is meant to run on the ALT, not the MAIN.")
