@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3
+    Account Manager v3.7
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.5"
+local VERSION = "3.7"
 local STAND_ANIMATION_ID = "138791542100078"
 local resolvedStandAnimationId = nil
 
@@ -49,7 +49,7 @@ end
 
 local HOST_USER_ID = 3104567111
 local ACCOUNTS = {
-    9039839654
+    9039839654, -- rafflesStorage1 / phone alt
 }
 
 --// Services
@@ -68,6 +68,11 @@ local startedAt = tick()
 -- Host        = the MAIN on the PC controlling the alt through chat.
 local LocalPlayer = Players.LocalPlayer
 local Host = Players:GetPlayerByUserId(HOST_USER_ID)
+
+local function refreshHost()
+    Host = Players:GetPlayerByUserId(HOST_USER_ID)
+    return Host
+end
 
 local function isManagedLocalAccount()
     for _, userId in ipairs(ACCOUNTS) do
@@ -113,7 +118,7 @@ end
 
 local function findPlayer(query)
     if query == nil or query == "" or string.lower(query) == "me" then
-        return Host
+        return refreshHost()
     end
 
     query = string.lower(query)
@@ -247,11 +252,11 @@ local function stopBotMovement(player)
     end
 
     cleanupStandConstraints(player)
-    restoreStandIdle(player)
 
     local humanoid = getHumanoid(player)
     if humanoid then
         humanoid:Move(Vector3.zero)
+        humanoid.AutoRotate = true
     end
 end
 
@@ -273,7 +278,6 @@ local function beginBotMode(player, mode, target)
     end
 
     cleanupStandConstraints(player)
-    restoreStandIdle(player)
 
     -- Invalidates any old loop belonging to this bot.
     state.token = state.token + 1
@@ -324,33 +328,34 @@ local function sendMessage(value)
 end
 
 local function sendEmote(emote)
-    -- The ALT is the LocalPlayer on this phone, so the emote command is sent
-    -- from this client. The MAIN does not need to execute anything.
-    local command = "/e " .. tostring(emote)
-
-    if usingTextChatService() then
-        local channels = TextChatService:FindFirstChild("TextChannels")
-        local general = channels and channels:FindFirstChild("RBXGeneral")
-
-        if general then
-            local ok = pcall(function()
-                general:SendAsync(command)
-            end)
-
-            if ok then
-                return
-            end
-        end
+    local humanoid = getHumanoid(LocalPlayer)
+    if not humanoid then
+        warn("[Account Manager] Cannot emote: Humanoid not ready.")
+        return false
     end
 
-    -- Legacy/fallback behavior.
-    pcall(function()
-        Players:Chat(command)
+    local name = tostring(emote or "")
+    if name == "" then
+        return false
+    end
+
+    -- Play the emote directly on the phone alt. This avoids sending "/e ..."
+    -- through TextChatService, which can show up as client-side command text.
+    local ok, result = pcall(function()
+        return humanoid:PlayEmote(name)
     end)
+
+    if not ok or result == false then
+        warn("[Account Manager] Could not play emote:", name, result)
+        return false
+    end
+
+    return true
 end
 
 local function whisperHost(text)
-    if not Host or not usingTextChatService() then
+    local hostPlayer = refreshHost()
+    if not hostPlayer or not usingTextChatService() then
         return false
     end
 
@@ -382,13 +387,23 @@ local function whisperHost(text)
     local general = channels:FindFirstChild("RBXGeneral")
     if general then
         local ok = pcall(function()
-            general:SendAsync("/w " .. Host.Name .. " " .. tostring(text))
+            general:SendAsync("/w " .. hostPlayer.Name .. " " .. tostring(text))
         end)
         return ok
     end
 
     return false
 end
+
+local function replyToHost(text)
+    -- All command/status feedback is private by default.
+    -- Only commands that intentionally call sendMessage(), such as ,say,
+    -- should speak publicly.
+    if not whisperHost(tostring(text)) then
+        warn("[Account Manager -> Host] " .. tostring(text))
+    end
+end
+
 
 --// Commands
 
@@ -418,7 +433,7 @@ local function addCommand(names, description, callback)
     end
 end
 
-addCommand({ "help", "cmds", "commands" }, "Whisper the command list to the host.", function()
+addCommand({ "help", "cmds", "commands" }, "Whisper the command list to the host. Commands may also be whispered to the alt.", function()
     local lines = {
         "=== Account Manager v" .. VERSION .. " ===",
         ",bring | ,line <left/right/front/back>",
@@ -430,7 +445,7 @@ addCommand({ "help", "cmds", "commands" }, "Whisper the command list to the host
         ",wave | ,cheer | ,laugh | ,point",
         ",applaud | ,shrug | ,emote <name>",
         ",say <message> | ,reset | ,rejoin",
-        ",index | ,promo | ,meatballify | ,end",
+        ",index | ,promo | ,animid | ,meatballify | ,end",
     }
 
     for _, line in ipairs(lines) do
@@ -446,12 +461,26 @@ addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", f
     local id = resolveCatalogAnimation(STAND_ANIMATION_ID)
     if id then
         print("[Account Manager] Angel actual animation:", id)
-        sendMessage("Angel actual animation: " .. tostring(id))
+        replyToHost("Angel actual animation: " .. tostring(id))
     end
 end)
 
+addCommand({ "status", "check" }, "Show Account Manager runtime status.", function()
+    local hostPlayer = refreshHost()
+    local _, humanoid, root = getCharacter(LocalPlayer)
+    local state = getBotState(LocalPlayer)
+
+    replyToHost(
+        "AM v" .. VERSION
+        .. " | alt=" .. LocalPlayer.Name .. " (" .. LocalPlayer.UserId .. ")"
+        .. " | host=" .. (hostPlayer and hostPlayer.Name or "missing")
+        .. " | char=" .. tostring(root ~= nil and humanoid ~= nil)
+        .. " | mode=" .. tostring(state.mode or "none")
+    )
+end)
+
 addCommand({ "ex", "example", "debug" }, "Show command response time.", function()
-    sendMessage(
+    replyToHost(
         "Identified in "
             .. string.format("%.2f", tick() - startedAt)
             .. " seconds."
@@ -467,10 +496,10 @@ addCommand({ "rejoin", "rj", "rej", "reconnect", "r" }, "Rejoin the current serv
 end)
 
 addCommand({ "bring" }, "Bring managed accounts beside the host.", function()
-    local hostRoot = getRoot(Host)
+    local hostRoot = getRoot(refreshHost())
 
     if not hostRoot then
-        sendMessage("Host character is not ready.")
+        replyToHost("Host character is not ready.")
         return
     end
 
@@ -497,15 +526,15 @@ end)
 
 addCommand({ "line" }, "Line accounts left/right/front/back of the host.", function(_, ...)
     local direction = string.lower(table.concat({ ... }, " "))
-    local hostRoot = getRoot(Host)
+    local hostRoot = getRoot(refreshHost())
 
     if not hostRoot then
-        sendMessage("Host character is not ready.")
+        replyToHost("Host character is not ready.")
         return
     end
 
     if direction == "" then
-        sendMessage("Usage: " .. PREFIX .. "line <left/right/front/back>")
+        replyToHost("Usage: " .. PREFIX .. "line <left/right/front/back>")
         return
     end
 
@@ -529,7 +558,7 @@ addCommand({ "line" }, "Line accounts left/right/front/back of the host.", funct
             elseif direction == "front" or direction == "f" then
                 offset = CFrame.new(0, 0, -i * 4)
             else
-                sendMessage("Unknown line direction: " .. direction)
+                replyToHost("Unknown line direction: " .. direction)
                 return
             end
 
@@ -548,12 +577,12 @@ addCommand({ "orbit", "circle" }, "Orbit a player. Usage: ,orbit player [speed] 
     local radius = tonumber(radiusArg) or 5
 
     if not target then
-        sendMessage("Target not found.")
+        replyToHost("Target not found.")
         return
     end
 
     if radius <= 0 then
-        sendMessage("Radius must be greater than 0.")
+        replyToHost("Radius must be greater than 0.")
         return
     end
 
@@ -607,7 +636,7 @@ addCommand({ "promo", "promote", "share", "brag", "advertise", "ad" }, "Show Acc
 end)
 
 addCommand({ "index", "ingame", "online" }, "Show number of managed accounts online.", function()
-    sendMessage("Managing " .. #getManagedBots() .. " accounts.")
+    replyToHost("Managing " .. #getManagedBots() .. " accounts.")
 end)
 
 addCommand({ "meatballify", "meatball", "gwibard" }, "Run the existing meatballify script.", function()
@@ -622,14 +651,14 @@ addCommand({ "meatballify", "meatball", "gwibard" }, "Run the existing meatballi
 
     if not ok then
         warn("[Account Manager] meatballify failed:", err)
-        sendMessage("Meatballify failed to load.")
+        replyToHost("Meatballify failed to load.")
     end
 end)
 
 addCommand({ "end", "stop", "quit", "exit", "close" }, "Disable Account Manager commands.", function()
     stopAllMovement()
     running = false
-    sendMessage("Account Manager successfully closed.")
+    replyToHost("Account Manager successfully closed.")
 end)
 
 addCommand({ "dance", "groove" }, "Dance. Usage: ,dance [1/2/3]", function(_, dance)
@@ -670,7 +699,7 @@ addCommand({ "emote", "e" }, "Run an emote.", function(_, ...)
     local emote = table.concat({ ... }, " ")
 
     if emote == "" then
-        sendMessage("Usage: " .. PREFIX .. "emote <name>")
+        replyToHost("Usage: " .. PREFIX .. "emote <name>")
         return
     end
 
@@ -706,7 +735,7 @@ addCommand({ "ws", "walkspeed" }, "Set managed account WalkSpeed.", function(_, 
     local speed = tonumber(speedArg)
 
     if not speed or speed <= 0 then
-        sendMessage("Please provide a valid positive number for speed.")
+        replyToHost("Please provide a valid positive number for speed.")
         return
     end
 
@@ -722,9 +751,9 @@ addCommand({ "ws", "walkspeed" }, "Set managed account WalkSpeed.", function(_, 
             end
 
             humanoid.WalkSpeed = speed
-            sendMessage(bot.Name .. "'s walk speed set to " .. speed .. ".")
+            replyToHost(bot.Name .. "'s walk speed set to " .. speed .. ".")
         else
-            sendMessage(bot.Name .. " does not have a humanoid.")
+            replyToHost(bot.Name .. " does not have a humanoid.")
         end
     end
 end)
@@ -737,29 +766,29 @@ addCommand({ "resetws", "defaultws" }, "Restore saved WalkSpeed.", function()
 
         if humanoid and state.defaultWalkSpeed ~= nil then
             humanoid.WalkSpeed = state.defaultWalkSpeed
-            sendMessage(bot.Name .. "'s walk speed reset to default.")
+            replyToHost(bot.Name .. "'s walk speed reset to default.")
         else
-            sendMessage("Cannot reset walk speed for " .. bot.Name .. ".")
+            replyToHost("Cannot reset walk speed for " .. bot.Name .. ".")
         end
     end
 end)
 
 addCommand({ "stand" }, "Float behind the host.", function()
-    if not getRoot(Host) then
-        sendMessage("Host character is not ready.")
+    if not getRoot(refreshHost()) then
+        replyToHost("Host character is not ready.")
         return
     end
 
     local bots = getManagedBots()
 
     if #bots == 0 then
-        sendMessage("No accounts available to stand.")
+        replyToHost("No accounts available to stand.")
         return
     end
 
     for i, entry in ipairs(bots) do
         local bot = entry.player
-        local token = beginBotMode(bot, "stand", Host)
+        local token = beginBotMode(bot, "stand", refreshHost())
 
         local humanoid = getHumanoid(bot)
         local state = getBotState(bot)
@@ -797,7 +826,7 @@ addCommand({ "stand" }, "Float behind the host.", function()
         -- Smooth stand: physics constraints continuously pull the alt to an
         -- attachment behind the host instead of repeatedly teleporting it.
         local botRoot = getRoot(bot)
-        local hostRoot = getRoot(Host)
+        local hostRoot = getRoot(refreshHost())
 
         if botRoot and hostRoot then
             local botAttachment = Instance.new("Attachment")
@@ -815,9 +844,9 @@ addCommand({ "stand" }, "Float behind the host.", function()
             alignPosition.Attachment1 = targetAttachment
             alignPosition.Mode = Enum.PositionAlignmentMode.TwoAttachment
             alignPosition.ApplyAtCenterOfMass = true
-            alignPosition.MaxForce = 100000
-            alignPosition.MaxVelocity = 32
-            alignPosition.Responsiveness = 18
+            alignPosition.MaxForce = 1000000
+            alignPosition.MaxVelocity = 45
+            alignPosition.Responsiveness = 22
             alignPosition.RigidityEnabled = false
             alignPosition.Parent = botRoot
 
@@ -826,9 +855,9 @@ addCommand({ "stand" }, "Float behind the host.", function()
             alignOrientation.Attachment0 = botAttachment
             alignOrientation.Attachment1 = targetAttachment
             alignOrientation.Mode = Enum.OrientationAlignmentMode.TwoAttachment
-            alignOrientation.MaxTorque = 100000
-            alignOrientation.MaxAngularVelocity = 25
-            alignOrientation.Responsiveness = 14
+            alignOrientation.MaxTorque = 1000000
+            alignOrientation.MaxAngularVelocity = 35
+            alignOrientation.Responsiveness = 18
             alignOrientation.RigidityEnabled = false
             alignOrientation.Parent = botRoot
 
@@ -847,7 +876,7 @@ addCommand({ "stand" }, "Float behind the host.", function()
             task.spawn(function()
                 while isModeActive(bot, "stand", token) do
                     local currentBotRoot = getRoot(bot)
-                    local currentHostRoot = getRoot(Host)
+                    local currentHostRoot = getRoot(refreshHost())
 
                     -- Only teleport as emergency recovery if physics leaves the
                     -- alt extremely far away. Normal following stays smooth.
@@ -880,14 +909,14 @@ addCommand({ "follow", "track", "watch" }, "Follow a player using pathfinding.",
     local target = findPlayer(targetName)
 
     if not target then
-        sendMessage("Target not found.")
+        replyToHost("Target not found.")
         return
     end
 
     local bots = getManagedBots()
 
     if #bots == 0 then
-        sendMessage("No accounts available to follow.")
+        replyToHost("No accounts available to follow.")
         return
     end
 
@@ -998,7 +1027,7 @@ local function processCommand(input)
     local callback = commands[commandName]
 
     if not callback then
-        sendMessage('Command "' .. commandName .. '" not found.')
+        replyToHost('Command "' .. commandName .. '" not found.')
         return
     end
 
@@ -1012,7 +1041,7 @@ local function processCommand(input)
             commandName,
             err
         )
-        sendMessage('Command "' .. commandName .. '" failed.')
+        replyToHost('Command "' .. commandName .. '" failed.')
     end
 end
 
@@ -1021,22 +1050,44 @@ end
 local function connectHostListener()
     if usingTextChatService() then
         TextChatService.MessageReceived:Connect(function(chatMessage)
-            if not running then
+            local source = chatMessage.TextSource
+            if not source or source.UserId ~= HOST_USER_ID then
                 return
             end
 
-            local source = chatMessage.TextSource
-
-            if source and source.UserId == HOST_USER_ID then
-                processCommand(chatMessage.Text)
-            end
+            -- MessageReceived receives both normal channel messages and whisper
+            -- channel messages. Since we authenticate by the host's UserId,
+            -- the main can control the alt with either:
+            --     ,stand
+            -- or a private whisper containing:
+            --     ,stand
+            processCommand(chatMessage.Text)
         end)
     else
-        Host.Chatted:Connect(function(input)
-            processCommand(input)
-        end)
+        local hostPlayer = refreshHost()
+        if hostPlayer then
+            hostPlayer.Chatted:Connect(function(input)
+                processCommand(input)
+            end)
+        else
+            warn("[Account Manager] Legacy chat requires the host to be present when the script starts.")
+        end
     end
 end
+
+-- Keep Host current if the main leaves/rejoins the same server.
+Players.PlayerAdded:Connect(function(player)
+    if player.UserId == HOST_USER_ID then
+        Host = player
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if player.UserId == HOST_USER_ID then
+        Host = nil
+        stopAllMovement()
+    end
+end)
 
 --// Startup
 
@@ -1045,23 +1096,30 @@ if LocalPlayer.UserId == HOST_USER_ID then
 elseif not isManagedLocalAccount() then
     warn(
         "[Account Manager] This alt is not listed in ACCOUNTS. Local UserId:",
-        LocalPlayer.UserId
-    )
-elseif Host then
-    connectHostListener()
-
-    sendMessage(
-        "Account Manager v"
-            .. VERSION
-            .. " modified by Rafa loaded on "
-            .. LocalPlayer.Name
-            .. " in "
-            .. string.format("%.2f", tick() - startedAt)
-            .. " seconds."
+        LocalPlayer.UserId,
+        "Expected:",
+        table.concat(ACCOUNTS, ", ")
     )
 else
-    warn(
-        "[Account Manager] MAIN/host is not currently visible in this server. Host UserId:",
-        HOST_USER_ID
-    )
+    -- TextChatService listener filters by HOST_USER_ID, so it can be connected
+    -- even if the main has not fully appeared in Players at this exact instant.
+    connectHostListener()
+
+    local hostNow = refreshHost()
+    if hostNow then
+        replyToHost(
+            "Account Manager v"
+                .. VERSION
+                .. " modified by Rafa loaded on "
+                .. LocalPlayer.Name
+                .. " in "
+                .. string.format("%.2f", tick() - startedAt)
+                .. " seconds."
+        )
+    else
+        warn(
+            "[Account Manager] Loaded successfully, but the MAIN is not visible yet. Waiting for UserId:",
+            HOST_USER_ID
+        )
+    end
 end
