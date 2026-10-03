@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.2"
+local VERSION = "3.3"
 local STAND_ANIMATION_ID = "138791542100078"
 
 local HOST_USER_ID = 3104567111
@@ -137,10 +137,53 @@ local function getBotState(player)
             target = nil,
             defaultWalkSpeed = nil,
             standAnimationTrack = nil,
+            savedIdle1 = nil,
+            savedIdle2 = nil,
+            savedIdleWeight1 = nil,
+            savedIdleWeight2 = nil,
         }
     end
 
     return botStates[userId]
+end
+
+local function restoreStandIdle(player)
+    local state = getBotState(player)
+    local character = player and player.Character
+    local animate = character and character:FindFirstChild("Animate")
+    local idle = animate and animate:FindFirstChild("idle")
+    local animation1 = idle and idle:FindFirstChild("Animation1")
+    local animation2 = idle and idle:FindFirstChild("Animation2")
+
+    if animation1 and state.savedIdle1 then
+        animation1.AnimationId = state.savedIdle1
+        local weight = animation1:FindFirstChild("Weight")
+        if weight and state.savedIdleWeight1 ~= nil then
+            weight.Value = state.savedIdleWeight1
+        end
+    end
+
+    if animation2 and state.savedIdle2 then
+        animation2.AnimationId = state.savedIdle2
+        local weight = animation2:FindFirstChild("Weight")
+        if weight and state.savedIdleWeight2 ~= nil then
+            weight.Value = state.savedIdleWeight2
+        end
+    end
+
+    state.savedIdle1 = nil
+    state.savedIdle2 = nil
+    state.savedIdleWeight1 = nil
+    state.savedIdleWeight2 = nil
+
+    -- Restart Animate so it immediately picks the restored idle.
+    if animate then
+        pcall(function()
+            animate.Disabled = true
+            task.wait()
+            animate.Disabled = false
+        end)
+    end
 end
 
 local function stopBotMovement(player)
@@ -157,6 +200,8 @@ local function stopBotMovement(player)
         end)
         state.standAnimationTrack = nil
     end
+
+    restoreStandIdle(player)
 
     local humanoid = getHumanoid(player)
     if humanoid then
@@ -180,6 +225,8 @@ local function beginBotMode(player, mode, target)
         end)
         state.standAnimationTrack = nil
     end
+
+    restoreStandIdle(player)
 
     -- Invalidates any old loop belonging to this bot.
     state.token = state.token + 1
@@ -661,33 +708,62 @@ addCommand({ "stand" }, "Float behind the host.", function()
 
         local humanoid = getHumanoid(bot)
         local state = getBotState(bot)
+        local character = bot.Character
+        local animate = character and character:FindFirstChild("Animate")
+        local idle = animate and animate:FindFirstChild("idle")
+        local animation1 = idle and idle:FindFirstChild("Animation1")
+        local animation2 = idle and idle:FindFirstChild("Animation2")
 
-        if humanoid then
+        if humanoid and animate and animation1 then
+            state.savedIdle1 = animation1.AnimationId
+
+            local weight1 = animation1:FindFirstChild("Weight")
+            if weight1 then
+                state.savedIdleWeight1 = weight1.Value
+            end
+
+            if animation2 then
+                state.savedIdle2 = animation2.AnimationId
+                local weight2 = animation2:FindFirstChild("Weight")
+                if weight2 then
+                    state.savedIdleWeight2 = weight2.Value
+                end
+            end
+
+            local standId = "rbxassetid://" .. STAND_ANIMATION_ID
+            animation1.AnimationId = standId
+
+            if weight1 then
+                weight1.Value = 10
+            end
+
+            -- Use the same floating idle in both idle slots so Animate cannot
+            -- randomly choose the avatar's normal second idle.
+            if animation2 then
+                animation2.AnimationId = standId
+                local weight2 = animation2:FindFirstChild("Weight")
+                if weight2 then
+                    weight2.Value = 10
+                end
+            end
+
+            -- Stop current tracks and restart Animate so the new idle is picked up.
             local animator = humanoid:FindFirstChildOfClass("Animator")
-            if not animator then
-                animator = Instance.new("Animator")
-                animator.Parent = humanoid
+            if animator then
+                for _, playingTrack in ipairs(animator:GetPlayingAnimationTracks()) do
+                    pcall(function()
+                        playingTrack:Stop(0.15)
+                    end)
+                end
             end
 
-            local animation = Instance.new("Animation")
-            animation.AnimationId = "rbxassetid://" .. STAND_ANIMATION_ID
-
-            local ok, track = pcall(function()
-                return animator:LoadAnimation(animation)
+            pcall(function()
+                animate.Disabled = true
+                task.wait()
+                animate.Disabled = false
             end)
-
-            animation:Destroy()
-
-            if ok and track then
-                track.Looped = true
-                track.Priority = Enum.AnimationPriority.Action
-                state.standAnimationTrack = track
-                pcall(function()
-                    track:Play(0.2)
-                end)
-            else
-                warn("[Account Manager] Could not load stand animation.")
-            end
+        else
+            warn("[Account Manager] Animate idle slots were not found on this character.")
         end
 
         task.spawn(function()
