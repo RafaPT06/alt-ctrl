@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.17
+    Account Manager v3.18
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.17"
+local VERSION = "3.18"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -544,7 +544,7 @@ addCommand({ "help", "cmds", "commands" }, "Send the command list to Discord.", 
         ",applaud | ,shrug | ,emote <name>",
         ",say <message> | ,reset | ,rejoin",
         ",index | ,promo | ,animid | ,meatballify | ,end",
-        ",god | ,ungod | ,tp | ,spin | ,freeze | ,face | ,float | ,guard",
+        ",god | ,ungod | ,ring | ,unring | ,tp | ,spin | ,freeze | ,face | ,float | ,guard",
         ",crazyorbit | ,launch | ,void | ,return | ,clone",
         ",copy | ,syncdance | ,dramatic | ,players | ,server",
     }
@@ -1180,6 +1180,92 @@ addCommand({ "ungod", "nogod" }, "Disable god mode.", function()
             humanoid.Health = math.min(humanoid.Health, 100)
         end)
     end
+end)
+
+local ringEnabled = false
+local ringRadius = 18
+local ringSpeed = 2.5
+local ringParts = {}
+
+local function isRingPart(part)
+    if not part:IsA("BasePart") or part.Anchored or part == workspace.Terrain then return false end
+    if part:IsDescendantOf(LocalPlayer.Character or workspace) then return false end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character and part:IsDescendantOf(player.Character) then return false end
+    end
+    return part.Size.Magnitude <= 45
+end
+
+local function stopRing()
+    ringEnabled = false
+    for part, movers in pairs(ringParts) do
+        if movers then
+            pcall(function() movers.position:Destroy() end)
+            pcall(function() movers.orientation:Destroy() end)
+            pcall(function() movers.attachment:Destroy() end)
+        end
+        ringParts[part] = nil
+    end
+end
+
+local function addRingPart(part)
+    if ringParts[part] or not isRingPart(part) then return end
+    local attachment = Instance.new("Attachment")
+    attachment.Name = "AccountManagerRing"
+    attachment.Parent = part
+    local position = Instance.new("AlignPosition")
+    position.Attachment0 = attachment
+    position.Mode = Enum.PositionAlignmentMode.OneAttachment
+    position.MaxForce = math.huge
+    position.MaxVelocity = math.huge
+    position.Responsiveness = 200
+    position.Parent = part
+    local orientation = Instance.new("AlignOrientation")
+    orientation.Attachment0 = attachment
+    orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+    orientation.MaxTorque = math.huge
+    orientation.Responsiveness = 100
+    orientation.Parent = part
+    ringParts[part] = { attachment = attachment, position = position, orientation = orientation }
+end
+
+addCommand({ "ring", "superring" }, "Collect loose debris into a defensive orbit. Usage: ,ring [radius] [speed]", function(_, radiusArg, speedArg)
+    ringRadius = math.clamp(tonumber(radiusArg) or ringRadius, 6, 60)
+    ringSpeed = math.clamp(tonumber(speedArg) or ringSpeed, 0.2, 12)
+    ringEnabled = true
+    task.spawn(function()
+        local scanAt = 0
+        while running and ringEnabled do
+            local root = getRoot(LocalPlayer)
+            if root then
+                if tick() >= scanAt then
+                    scanAt = tick() + 1
+                    for _, obj in ipairs(workspace:GetDescendants()) do
+                        if isRingPart(obj) then addRingPart(obj) end
+                    end
+                end
+                local active = {}
+                for part, movers in pairs(ringParts) do
+                    if part.Parent and isRingPart(part) then table.insert(active, {part, movers}) else ringParts[part] = nil end
+                end
+                local count = #active
+                local now = tick() * ringSpeed
+                for i, entry in ipairs(active) do
+                    local part, movers = entry[1], entry[2]
+                    local angle = now + ((i - 1) / math.max(count, 1)) * math.pi * 2
+                    local y = math.sin(angle * 2) * 2
+                    movers.position.Position = root.Position + Vector3.new(math.cos(angle) * ringRadius, y, math.sin(angle) * ringRadius)
+                    movers.orientation.CFrame = CFrame.Angles(0, angle, angle * 0.35)
+                    part.AssemblyLinearVelocity = Vector3.zero
+                end
+            end
+            task.wait()
+        end
+    end)
+end)
+
+addCommand({ "unring", "stopring" }, "Disable the defensive debris ring.", function()
+    stopRing()
 end)
 
 addCommand({ "tp", "goto" }, "Teleport beside a player.", function(_, ...)
