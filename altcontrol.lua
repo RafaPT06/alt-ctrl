@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.12
+    Account Manager v3.13
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.12"
+local VERSION = "3.13"
 local STAND_ANIMATION_ID = "138791542100078"
 local resolvedStandAnimationId = nil
 
@@ -361,6 +361,7 @@ end
 
 local function whisperHost(text)
     local hostPlayer = refreshHost()
+
     if not hostPlayer then
         warn("[Account Manager] Cannot whisper: host is not in the server.")
         return false
@@ -370,64 +371,77 @@ local function whisperHost(text)
 
     if usingTextChatService() then
         local channels = TextChatService:FindFirstChild("TextChannels")
+
         if not channels then
+            warn("[Account Manager] TextChannels folder not found.")
             return false
         end
 
+        local hostId = tostring(HOST_USER_ID)
+        local altId = tostring(LocalPlayer.UserId)
+
+        -- Find Roblox's actual private channel between MAIN and ALT.
+        -- Confirmed in-game:
+        -- RBXWhisper:3104567111_9039839654
         for _, channel in ipairs(channels:GetChildren()) do
-            if channel:IsA("TextChannel") and string.find(channel.Name, "RBXWhisper") then
-                local name = channel.Name
-                if string.find(name, tostring(HOST_USER_ID), 1, true)
-                    and string.find(name, tostring(LocalPlayer.UserId), 1, true) then
-                    local ok = pcall(function()
-                        channel:SendAsync(text)
-                    end)
-                    if ok then
-                        return true
-                    end
+            if channel:IsA("TextChannel")
+                and string.sub(channel.Name, 1, 10) == "RBXWhisper"
+                and string.find(channel.Name, hostId, 1, true)
+                and string.find(channel.Name, altId, 1, true) then
+
+                local ok, err = pcall(function()
+                    channel:SendAsync(text)
+                end)
+
+                if ok then
+                    print("[Account Manager] Private reply sent to " .. hostPlayer.Name)
+                    return true
                 end
+
+                warn(
+                    "[Account Manager] TextChatService whisper failed:",
+                    err
+                )
+
+                return false
             end
         end
 
-        local general = channels:FindFirstChild("RBXGeneral")
-        if general then
-            return pcall(function()
-                general:SendAsync("/w " .. hostPlayer.Name .. " " .. text)
-            end)
-        end
+        warn(
+            "[Account Manager] Whisper channel not found for",
+            HOST_USER_ID,
+            LocalPlayer.UserId
+        )
 
         return false
     end
 
-    -- LegacyChatService: send directly to the host's private channel.
-    -- Do this BEFORE Players:Chat because a successful pcall on Players:Chat
-    -- only proves the method did not error, not that Roblox delivered a whisper.
-    local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-    local sayRequest = chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
+    -- Legacy fallback for games genuinely using LegacyChatService.
+    local chatEvents =
+        ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+
+    local sayRequest =
+        chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
 
     if sayRequest and sayRequest:IsA("RemoteEvent") then
         local ok, err = pcall(function()
-            sayRequest:FireServer(text, "To " .. hostPlayer.Name)
+            sayRequest:FireServer(
+                text,
+                "To " .. hostPlayer.Name
+            )
         end)
 
-        if ok then
-            print("[Account Manager] Private reply sent to " .. hostPlayer.Name)
-            return true
+        if not ok then
+            warn(
+                "[Account Manager] Legacy whisper failed:",
+                err
+            )
         end
 
-        warn("[Account Manager] SayMessageRequest whisper failed:", err)
+        return ok
     end
 
-    -- Last-resort fallback.
-    local ok, err = pcall(function()
-        Players:Chat("/w " .. hostPlayer.Name .. " " .. text)
-    end)
-
-    if not ok then
-        warn("[Account Manager] Players:Chat whisper fallback failed:", err)
-    end
-
-    return ok
+    return false
 end
 
 local function replyToHost(text)
