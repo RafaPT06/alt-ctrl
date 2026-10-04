@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.15
+    Account Manager v3.16
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.15"
+local VERSION = "3.16"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -544,7 +544,7 @@ addCommand({ "help", "cmds", "commands" }, "Send the command list to Discord.", 
         ",applaud | ,shrug | ,emote <name>",
         ",say <message> | ,reset | ,rejoin",
         ",index | ,promo | ,animid | ,meatballify | ,end",
-        ",tp | ,spin | ,freeze | ,face | ,float | ,guard",
+        ",god | ,ungod | ,tp | ,spin | ,freeze | ,face | ,float | ,guard",
         ",crazyorbit | ,launch | ,void | ,return | ,clone",
         ",copy | ,syncdance | ,dramatic | ,players | ,server",
     }
@@ -1120,6 +1120,47 @@ local function resolveTargetFromArgs(...)
     end
     return target
 end
+
+local godModeEnabled = false
+local godConnection = nil
+
+local function applyGodMode()
+    local humanoid = getHumanoid(LocalPlayer)
+    if not humanoid then return end
+    pcall(function()
+        humanoid.MaxHealth = math.huge
+        humanoid.Health = math.huge
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+    end)
+end
+
+addCommand({ "god", "godmode" }, "Continuously restore health and block the Dead humanoid state.", function()
+    godModeEnabled = true
+    applyGodMode()
+    if godConnection then godConnection:Disconnect() end
+    godConnection = LocalPlayer.CharacterAdded:Connect(function()
+        if godModeEnabled then task.wait(0.5) applyGodMode() end
+    end)
+    task.spawn(function()
+        while running and godModeEnabled do
+            applyGodMode()
+            task.wait(0.05)
+        end
+    end)
+end)
+
+addCommand({ "ungod", "nogod" }, "Disable god mode.", function()
+    godModeEnabled = false
+    if godConnection then godConnection:Disconnect() godConnection = nil end
+    local humanoid = getHumanoid(LocalPlayer)
+    if humanoid then
+        pcall(function()
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+            humanoid.MaxHealth = 100
+            humanoid.Health = math.min(humanoid.Health, 100)
+        end)
+    end
+end)
 
 addCommand({ "tp", "goto" }, "Teleport beside a player.", function(_, ...)
     local target = resolveTargetFromArgs(...)
