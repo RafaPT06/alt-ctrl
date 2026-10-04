@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.16
+    Account Manager v3.17
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.16"
+local VERSION = "3.17"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -1125,22 +1125,37 @@ local godModeEnabled = false
 local godConnection = nil
 
 local function applyGodMode()
+    local character = LocalPlayer.Character
     local humanoid = getHumanoid(LocalPlayer)
-    if not humanoid then return end
+    if not character or not humanoid then return end
+
+    -- Natural Disaster Survival historically creates a local fall-damage
+    -- controller named FallDamageScript. Remove it whenever it is present.
+    local fallDamage = character:FindFirstChild("FallDamageScript", true)
+    if fallDamage then
+        pcall(function() fallDamage:Destroy() end)
+    end
+
     pcall(function()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
         humanoid.MaxHealth = math.huge
         humanoid.Health = math.huge
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
     end)
 end
 
-addCommand({ "god", "godmode" }, "Continuously restore health and block the Dead humanoid state.", function()
+addCommand({ "god", "godmode" }, "NDS-focused damage protection and continuous health restore.", function()
     godModeEnabled = true
     applyGodMode()
+
     if godConnection then godConnection:Disconnect() end
     godConnection = LocalPlayer.CharacterAdded:Connect(function()
-        if godModeEnabled then task.wait(0.5) applyGodMode() end
+        if godModeEnabled then
+            task.wait(0.5)
+            applyGodMode()
+        end
     end)
+
     task.spawn(function()
         while running and godModeEnabled do
             applyGodMode()
@@ -1151,11 +1166,16 @@ end)
 
 addCommand({ "ungod", "nogod" }, "Disable god mode.", function()
     godModeEnabled = false
-    if godConnection then godConnection:Disconnect() godConnection = nil end
+    if godConnection then
+        godConnection:Disconnect()
+        godConnection = nil
+    end
+
     local humanoid = getHumanoid(LocalPlayer)
     if humanoid then
         pcall(function()
             humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
             humanoid.MaxHealth = 100
             humanoid.Health = math.min(humanoid.Health, 100)
         end)
