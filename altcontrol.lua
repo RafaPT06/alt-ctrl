@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.14
+    Account Manager v3.15
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.14"
+local VERSION = "3.15"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -544,6 +544,9 @@ addCommand({ "help", "cmds", "commands" }, "Send the command list to Discord.", 
         ",applaud | ,shrug | ,emote <name>",
         ",say <message> | ,reset | ,rejoin",
         ",index | ,promo | ,animid | ,meatballify | ,end",
+        ",tp | ,spin | ,freeze | ,face | ,float | ,guard",
+        ",crazyorbit | ,launch | ,void | ,return | ,clone",
+        ",copy | ,syncdance | ,dramatic | ,players | ,server",
     }
 
     for _, line in ipairs(lines) do
@@ -1105,6 +1108,252 @@ addCommand({ "unfollow", "untrack", "unwatch", "standdown" }, "Stop follow/stand
             stopBotMovement(entry.player)
         end
     end
+end)
+
+--// Flex commands
+
+local function resolveTargetFromArgs(...)
+    local query = table.concat({ ... }, " ")
+    local target = findPlayer(query)
+    if not target then
+        replyToHost("Target not found.")
+    end
+    return target
+end
+
+addCommand({ "tp", "goto" }, "Teleport beside a player.", function(_, ...)
+    local target = resolveTargetFromArgs(...)
+    local targetRoot = target and getRoot(target)
+    local root = getRoot(LocalPlayer)
+    if root and targetRoot then
+        stopBotMovement(LocalPlayer)
+        root.CFrame = targetRoot.CFrame * CFrame.new(3, 0, 0)
+    end
+end)
+
+addCommand({ "spin" }, "Spin in place. Usage: ,spin [speed]", function(_, speedArg)
+    local root = getRoot(LocalPlayer)
+    if not root then return end
+    local speed = math.clamp(tonumber(speedArg) or 18, 1, 100)
+    local token = beginBotMode(LocalPlayer, "spin", nil)
+    task.spawn(function()
+        while isModeActive(LocalPlayer, "spin", token) do
+            local currentRoot = getRoot(LocalPlayer)
+            if currentRoot then
+                currentRoot.CFrame = currentRoot.CFrame * CFrame.Angles(0, math.rad(speed), 0)
+            end
+            task.wait(0.03)
+        end
+    end)
+end)
+
+addCommand({ "unspin", "stopspin" }, "Stop spinning.", function()
+    if getBotState(LocalPlayer).mode == "spin" then stopBotMovement(LocalPlayer) end
+end)
+
+addCommand({ "freeze" }, "Freeze the alt in place.", function()
+    local root = getRoot(LocalPlayer)
+    if not root then return end
+    beginBotMode(LocalPlayer, "freeze", nil)
+    root.Anchored = true
+end)
+
+addCommand({ "unfreeze", "thaw" }, "Unfreeze the alt.", function()
+    local root = getRoot(LocalPlayer)
+    if root then root.Anchored = false end
+    if getBotState(LocalPlayer).mode == "freeze" then stopBotMovement(LocalPlayer) end
+end)
+
+addCommand({ "face", "stare" }, "Continuously face a player.", function(_, ...)
+    local target = resolveTargetFromArgs(...)
+    if not target then return end
+    local token = beginBotMode(LocalPlayer, "face", target)
+    task.spawn(function()
+        while isModeActive(LocalPlayer, "face", token) do
+            local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
+            if root and targetRoot then
+                root.CFrame = CFrame.lookAt(root.Position, Vector3.new(targetRoot.Position.X, root.Position.Y, targetRoot.Position.Z))
+            end
+            task.wait(0.05)
+        end
+    end)
+end)
+
+addCommand({ "unface", "unstare" }, "Stop facing a player.", function()
+    if getBotState(LocalPlayer).mode == "face" then stopBotMovement(LocalPlayer) end
+end)
+
+addCommand({ "float", "hover" }, "Hover above a player. Usage: ,float [player] [height]", function(_, ...)
+    local args = { ... }
+    local height = tonumber(args[#args])
+    if height then table.remove(args, #args) else height = 8 end
+    height = math.clamp(height, 2, 50)
+    local target = findPlayer(table.concat(args, " "))
+    if not target then target = refreshHost() end
+    if not target then replyToHost("Target not found.") return end
+    local token = beginBotMode(LocalPlayer, "float", target)
+    task.spawn(function()
+        while isModeActive(LocalPlayer, "float", token) do
+            local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
+            if root and targetRoot then
+                root.CFrame = CFrame.lookAt(targetRoot.Position + Vector3.new(0, height, 0), targetRoot.Position)
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end
+            task.wait(0.05)
+        end
+    end)
+end)
+
+addCommand({ "unfloat", "unhover" }, "Stop hovering.", function()
+    if getBotState(LocalPlayer).mode == "float" then stopBotMovement(LocalPlayer) end
+end)
+
+addCommand({ "guard", "bodyguard" }, "Guard a player from behind.", function(_, ...)
+    local target = resolveTargetFromArgs(...)
+    if not target then return end
+    local token = beginBotMode(LocalPlayer, "guard", target)
+    task.spawn(function()
+        while isModeActive(LocalPlayer, "guard", token) do
+            local root, humanoid, targetRoot = getRoot(LocalPlayer), getHumanoid(LocalPlayer), getRoot(target)
+            if root and humanoid and targetRoot then
+                local destination = (targetRoot.CFrame * CFrame.new(2.5, 0, 4)).Position
+                if (root.Position - destination).Magnitude > 4 then humanoid:MoveTo(destination) end
+                if (root.Position - destination).Magnitude > 40 then root.CFrame = CFrame.new(destination) end
+            end
+            task.wait(0.15)
+        end
+    end)
+end)
+
+addCommand({ "unguard", "stopguard" }, "Stop guarding.", function()
+    if getBotState(LocalPlayer).mode == "guard" then stopBotMovement(LocalPlayer) end
+end)
+
+addCommand({ "crazyorbit", "spiral" }, "Spiral around a player.", function(_, targetArg, speedArg, radiusArg)
+    local target = findPlayer(targetArg or "me")
+    if not target then replyToHost("Target not found.") return end
+    local speed = math.clamp(tonumber(speedArg) or 24, 1, 100)
+    local radius = math.clamp(tonumber(radiusArg) or 7, 2, 30)
+    local token = beginBotMode(LocalPlayer, "crazyorbit", target)
+    task.spawn(function()
+        local angle = 0
+        while isModeActive(LocalPlayer, "crazyorbit", token) do
+            local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
+            if root and targetRoot then
+                local wave = math.sin(angle * 2) * 4
+                local changingRadius = radius + math.sin(angle * 1.5) * (radius * 0.4)
+                local destination = targetRoot.Position + Vector3.new(math.cos(angle) * changingRadius, 4 + wave, math.sin(angle) * changingRadius)
+                root.CFrame = CFrame.lookAt(destination, targetRoot.Position)
+            end
+            angle = angle + math.rad(speed)
+            task.wait(0.05)
+        end
+    end)
+end)
+
+addCommand({ "launch", "yeet" }, "Launch the alt upward. Usage: ,launch [power]", function(_, powerArg)
+    local root = getRoot(LocalPlayer)
+    if root then
+        stopBotMovement(LocalPlayer)
+        local power = math.clamp(tonumber(powerArg) or 110, 25, 300)
+        root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, power, root.AssemblyLinearVelocity.Z)
+    end
+end)
+
+local savedReturnCFrame = nil
+addCommand({ "void" }, "Drop the alt far below the map.", function()
+    local root = getRoot(LocalPlayer)
+    if root then
+        stopBotMovement(LocalPlayer)
+        savedReturnCFrame = root.CFrame
+        root.CFrame = root.CFrame - Vector3.new(0, 500, 0)
+    end
+end)
+
+addCommand({ "return", "returnpos" }, "Return from ,void.", function()
+    local root = getRoot(LocalPlayer)
+    if root and savedReturnCFrame then
+        root.CFrame = savedReturnCFrame
+        savedReturnCFrame = nil
+    end
+end)
+
+addCommand({ "clone", "copyavatar" }, "Copy a player's avatar appearance locally.", function(_, ...)
+    local target = resolveTargetFromArgs(...)
+    local humanoid = getHumanoid(LocalPlayer)
+    local targetHumanoid = target and getHumanoid(target)
+    if humanoid and targetHumanoid then
+        local ok, description = pcall(function() return targetHumanoid:GetAppliedDescription() end)
+        if ok and description then
+            local applied, err = pcall(function() humanoid:ApplyDescription(description) end)
+            if not applied then replyToHost("Avatar copy failed: " .. tostring(err)) end
+        end
+    end
+end)
+
+addCommand({ "copy", "mirror" }, "Mirror a player's movement and jumps.", function(_, ...)
+    local target = resolveTargetFromArgs(...)
+    if not target then return end
+    local token = beginBotMode(LocalPlayer, "copy", target)
+    task.spawn(function()
+        while isModeActive(LocalPlayer, "copy", token) do
+            local humanoid, targetHumanoid = getHumanoid(LocalPlayer), getHumanoid(target)
+            if humanoid and targetHumanoid then
+                humanoid:Move(targetHumanoid.MoveDirection, false)
+                if targetHumanoid.Jump then humanoid.Jump = true end
+            end
+            task.wait(0.05)
+        end
+    end)
+end)
+
+addCommand({ "uncopy", "unmirror" }, "Stop mirroring.", function()
+    if getBotState(LocalPlayer).mode == "copy" then stopBotMovement(LocalPlayer) end
+end)
+
+addCommand({ "syncdance" }, "Start a dance on this managed alt.", function(_, dance)
+    dance = tostring(dance or "1")
+    sendEmote(dance == "1" and "dance" or ("dance" .. dance))
+end)
+
+addCommand({ "dramatic" }, "Run a dramatic floating entrance.", function()
+    local host = refreshHost()
+    local root, hostRoot = getRoot(LocalPlayer), getRoot(host)
+    if not root or not hostRoot then return end
+    local token = beginBotMode(LocalPlayer, "dramatic", host)
+    task.spawn(function()
+        root.CFrame = hostRoot.CFrame * CFrame.new(0, 0, 5)
+        local started = tick()
+        while isModeActive(LocalPlayer, "dramatic", token) and tick() - started < 4 do
+            local currentRoot, currentHostRoot = getRoot(LocalPlayer), getRoot(host)
+            if currentRoot and currentHostRoot then
+                local elapsed = tick() - started
+                local height = math.min(elapsed * 2.5, 8)
+                local angle = elapsed * 2
+                local pos = (currentHostRoot.CFrame * CFrame.new(0, height, 5)).Position
+                currentRoot.CFrame = CFrame.new(pos) * CFrame.Angles(0, angle, 0)
+                currentRoot.AssemblyLinearVelocity = Vector3.zero
+            end
+            task.wait(0.03)
+        end
+        if isModeActive(LocalPlayer, "dramatic", token) then stopBotMovement(LocalPlayer) end
+    end)
+end)
+
+addCommand({ "players", "playerlist" }, "Print the server player list in the executor console.", function()
+    print("=== Account Manager Players (" .. #Players:GetPlayers() .. ") ===")
+    for _, player in ipairs(Players:GetPlayers()) do
+        print(player.DisplayName .. " | @" .. player.Name .. " | " .. player.UserId)
+    end
+end)
+
+addCommand({ "server", "serverinfo" }, "Print server information in the executor console.", function()
+    print("=== Account Manager Server ===")
+    print("PlaceId:", game.PlaceId)
+    print("JobId:", game.JobId)
+    print("Players:", #Players:GetPlayers() .. "/" .. Players.MaxPlayers)
+    print("Uptime:", math.floor(workspace.DistributedGameTime) .. "s")
 end)
 
 addCommand({ "undance", "nodance", "nd", "stopdance" }, "Stop the current emote.", function()
