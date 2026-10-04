@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.13
+    Account Manager v3.14
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,8 +15,9 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.13"
+local VERSION = "3.14"
 local STAND_ANIMATION_ID = "138791542100078"
+local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
 
 local function resolveCatalogAnimation(catalogId)
@@ -60,6 +61,7 @@ local TextChatService = game:GetService("TextChatService")
 local TeleportService = game:GetService("TeleportService")
 local PathfindingService = game:GetService("PathfindingService")
 local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
 
 --// Runtime
 
@@ -454,6 +456,49 @@ local function replyToHost(text)
 end
 
 
+local executorRequest = request or http_request
+
+local function reportToDiscord(commandName, data)
+    if type(executorRequest) ~= "function" then
+        warn("[Account Manager] Executor HTTP request API is unavailable.")
+        return false
+    end
+
+    data = data or {}
+    data.command = commandName
+    data.version = VERSION
+    data.alt = LocalPlayer.Name
+    data.altUserId = LocalPlayer.UserId
+    data.hostUserId = HOST_USER_ID
+
+    local hostPlayer = refreshHost()
+    data.host = hostPlayer and hostPlayer.Name or "missing"
+
+    local ok, response = pcall(function()
+        return executorRequest({
+            Url = REPORT_ENDPOINT,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = HttpService:JSONEncode(data),
+        })
+    end)
+
+    if not ok then
+        warn("[Account Manager] Discord report request failed:", response)
+        return false
+    end
+
+    local statusCode = tonumber(response and (response.StatusCode or response.Status))
+    if statusCode and statusCode >= 200 and statusCode < 300 then
+        print("[Account Manager] Sent " .. commandName .. " to Discord.")
+        return true
+    end
+
+    warn("[Account Manager] Discord report rejected:", statusCode or "unknown", response and response.Body or "")
+    return false
+end
+
+
 --// Commands
 
 local function addCommand(names, description, callback)
@@ -482,7 +527,11 @@ local function addCommand(names, description, callback)
     end
 end
 
-addCommand({ "help", "cmds", "commands" }, "Whisper the command list to the host. Commands may also be whispered to the alt.", function()
+addCommand({ "help", "cmds", "commands" }, "Send the command list to Discord.", function()
+    if reportToDiscord("help") then
+        return
+    end
+
     local lines = {
         "=== Account Manager v" .. VERSION .. " ===",
         ",bring | ,line <left/right/front/back>",
@@ -527,18 +576,25 @@ addCommand({ "chattest", "ct" }, "Whisper a legacy-chat diagnostic back to the h
     )
 end)
 
-addCommand({ "status", "check" }, "Show Account Manager runtime status.", function()
+addCommand({ "status", "check" }, "Send Account Manager runtime status to Discord.", function()
     local hostPlayer = refreshHost()
     local _, humanoid, root = getCharacter(LocalPlayer)
     local state = getBotState(LocalPlayer)
+    local payload = {
+        characterReady = root ~= nil and humanoid ~= nil,
+        chat = tostring(TextChatService.ChatVersion),
+        mode = tostring(state.mode or "none"),
+    }
 
-    replyToHost(
-        "AM v" .. VERSION
-        .. " | alt=" .. LocalPlayer.Name .. " (" .. LocalPlayer.UserId .. ")"
-        .. " | host=" .. (hostPlayer and hostPlayer.Name or "missing")
-        .. " | char=" .. tostring(root ~= nil and humanoid ~= nil)
-        .. " | chat=" .. tostring(TextChatService.ChatVersion) .. " | mode=" .. tostring(state.mode or "none")
-    )
+    if not reportToDiscord("status", payload) then
+        replyToHost(
+            "AM v" .. VERSION
+            .. " | alt=" .. LocalPlayer.Name .. " (" .. LocalPlayer.UserId .. ")"
+            .. " | host=" .. (hostPlayer and hostPlayer.Name or "missing")
+            .. " | char=" .. tostring(payload.characterReady)
+            .. " | chat=" .. payload.chat .. " | mode=" .. payload.mode
+        )
+    end
 end)
 
 addCommand({ "ex", "example", "debug" }, "Show command response time.", function()
@@ -697,8 +753,11 @@ addCommand({ "promo", "promote", "share", "brag", "advertise", "ad" }, "Show Acc
     end
 end)
 
-addCommand({ "index", "ingame", "online" }, "Show number of managed accounts online.", function()
-    replyToHost("Managing " .. #getManagedBots() .. " accounts.")
+addCommand({ "index", "ingame", "online" }, "Send managed-account count to Discord.", function()
+    local count = #getManagedBots()
+    if not reportToDiscord("index", { count = count }) then
+        replyToHost("Managing " .. count .. " accounts.")
+    end
 end)
 
 addCommand({ "meatballify", "meatball", "gwibard" }, "Run the existing meatballify script.", function()
