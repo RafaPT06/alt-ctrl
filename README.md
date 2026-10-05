@@ -72,3 +72,24 @@ This document provides an overview of the available commands for managing bots i
 - **Movement Controls**
   - `,ws <speed>`, `,walkspeed <speed>`: Set the bot's walk speed.
   - `,resetws`, `,defaultws`: Reset walk speed to default settings.
+
+## Help
+
+- `,help`: Show the first page privately and send the current command registry to the existing Discord report endpoint.
+- `,help 2`: Show another page (eight commands per page).
+- `,help ring` or `,help bunnyhop`: Show a command's description, usage where available, and aliases.
+- Help is generated from the registered commands, so new commands appear automatically.
+
+## Fun Commands (v3.20)
+
+| Command | What it does |
+| --- | --- |
+| `,hop [interval]` / `,bunnyhop` | Keep hopping; default 1 second, bounded to 0.4–5 seconds. |
+| `,moonwalk` | Walk backward while keeping the starting facing direction. |
+| `,zigzag [period]` | Walk forward with alternating sideways movement; default 2 seconds, bounded to 0.5–5 seconds per cycle. |
+| `,wiggle [degrees] [speed]` / `,shimmy` | Wiggle in place; default 25 degrees and 2 cycles/second, bounded to 5–60 degrees and 0.5–6 cycles/second. |
+| `,sit` / `,chill` | Sit down. |
+| `,unsit` / `,getup` | Stand up. |
+| `,stopfun` / `,unfun` | Stop any of the fun movement modes above. |
+
+Starting another movement mode cancels the current fun mode. The animated modes stop on death, respawn, or an anchored root. Use `,unfreeze` before starting them while frozen.
