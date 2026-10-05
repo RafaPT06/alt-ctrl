@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.18
+    Account Manager v3.19
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.18"
+local VERSION = "3.19"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -544,7 +544,7 @@ addCommand({ "help", "cmds", "commands" }, "Send the command list to Discord.", 
         ",applaud | ,shrug | ,emote <name>",
         ",say <message> | ,reset | ,rejoin",
         ",index | ,promo | ,animid | ,meatballify | ,end",
-        ",god | ,ungod | ,ring | ,unring | ,tp | ,spin | ,freeze | ,face | ,float | ,guard",
+        ",god | ,ungod | ,ring [radius] [speed] | ,ringlimit <20-150> | ,unring | ,tp | ,spin | ,freeze | ,face | ,float | ,guard",
         ",crazyorbit | ,launch | ,void | ,return | ,clone",
         ",copy | ,syncdance | ,dramatic | ,players | ,server",
     }
@@ -1185,83 +1185,249 @@ end)
 local ringEnabled = false
 local ringRadius = 18
 local ringSpeed = 2.5
+local ringLimit = 80
 local ringParts = {}
+local ringConnections = {}
+local ringCandidates = {}
+local ringCandidateCount = 0
+local ringRetryAt = setmetatable({}, { __mode = "k" })
+local ringCharacters = {}
+local ringOverlap = nil
+local ringCell = 4
+local ringCount = 0
+local RING_INTERVAL = 1 / 25
+local RING_DISCOVERY_RADIUS = 120
+local RING_RELEASE_DISTANCE = 240
+local RING_CANDIDATE_LIMIT = 512
+-- Optional executor API; ordinary clients fall back to a movement check.
+local ringOwnerCheck = type(isnetworkowner) == "function" and isnetworkowner or nil
 
 local function isRingPart(part)
-    if not part:IsA("BasePart") or part.Anchored or part == workspace.Terrain then return false end
-    if part:IsDescendantOf(LocalPlayer.Character or workspace) then return false end
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player.Character and part:IsDescendantOf(player.Character) then return false end
+    if not part:IsA("BasePart") or not part:IsDescendantOf(workspace)
+        or part.Anchored or part.Size.Magnitude > 45 then return false end
+    local assembly = part.AssemblyRootPart
+    if not assembly or assembly.Anchored then return false end
+    local ancestor = part.Parent
+    while ancestor and ancestor ~= workspace do
+        if ancestor:IsA("Accessory") or ancestor:IsA("Tool")
+            or (ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid"))
+            or (ancestor:IsA("Model") and Players:GetPlayerFromCharacter(ancestor)) then return false end
+        ancestor = ancestor.Parent
     end
-    return part.Size.Magnitude <= 45
+    return true
+end
+
+local function removeRingPart(part, retry)
+    local movers = ringParts[part]
+    if not movers then return end
+    ringParts[part] = nil
+    ringCount = ringCount - 1
+    for _, object in ipairs({ movers.position, movers.orientation, movers.attachment }) do
+        pcall(function() object:Destroy() end)
+    end
+    if retry then ringRetryAt[part] = tick() + 10 end
 end
 
 local function stopRing()
     ringEnabled = false
-    for part, movers in pairs(ringParts) do
-        if movers then
-            pcall(function() movers.position:Destroy() end)
-            pcall(function() movers.orientation:Destroy() end)
-            pcall(function() movers.attachment:Destroy() end)
-        end
-        ringParts[part] = nil
+    for _, connection in ipairs(ringConnections) do connection:Disconnect() end
+    ringConnections = {}
+    for part in pairs(ringParts) do removeRingPart(part) end
+    ringCandidates = {}
+    ringCandidateCount = 0
+    ringRetryAt = setmetatable({}, { __mode = "k" })
+    ringCharacters = {}
+    ringOverlap = nil
+    ringCell = 4
+end
+
+local function queueRingPart(part)
+    if not ringEnabled or not part:IsA("BasePart") then return end
+    -- One set of movers per assembly, rather than per welded piece.
+    part = part.AssemblyRootPart or part
+    if ringParts[part] or ringCandidates[part]
+        or (ringRetryAt[part] or 0) > tick() then return end
+    local root = getRoot(LocalPlayer)
+    if not root or not isRingPart(part)
+        or (part.Position - root.Position).Magnitude > RING_DISCOVERY_RADIUS then return end
+    if ringCandidateCount < RING_CANDIDATE_LIMIT then
+        ringCandidates[part] = true
+        ringCandidateCount = ringCandidateCount + 1
     end
 end
 
-local function addRingPart(part)
-    if ringParts[part] or not isRingPart(part) then return end
+local function ownsRingPart(part)
+    if not ringOwnerCheck then return true end
+    local ok, owned = pcall(ringOwnerCheck, part)
+    if not ok then
+        ringOwnerCheck = nil
+        return true
+    end
+    return owned == true
+end
+
+local function addRingPart(part, now)
+    if ringCount >= ringLimit or not isRingPart(part) then return end
+    -- Reject assemblies welded to any character/accessory before attaching movers.
+    for _, connected in ipairs(part:GetConnectedParts(true)) do
+        if not isRingPart(connected) then return end
+    end
+    if not ownsRingPart(part) then
+        ringRetryAt[part] = now + 10
+        return
+    end
     local attachment = Instance.new("Attachment")
     attachment.Name = "AccountManagerRing"
-    attachment.Parent = part
     local position = Instance.new("AlignPosition")
-    position.Attachment0 = attachment
-    position.Mode = Enum.PositionAlignmentMode.OneAttachment
-    position.MaxForce = math.huge
-    position.MaxVelocity = math.huge
-    position.Responsiveness = 200
-    position.Parent = part
     local orientation = Instance.new("AlignOrientation")
-    orientation.Attachment0 = attachment
-    orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
-    orientation.MaxTorque = math.huge
-    orientation.Responsiveness = 100
-    orientation.Parent = part
-    ringParts[part] = { attachment = attachment, position = position, orientation = orientation }
+    -- Register first so partial setup failures can still be fully cleaned up.
+    ringParts[part] = {
+        attachment = attachment, position = position, orientation = orientation,
+        checkAt = now + 3, lastPosition = part.Position, target = part.Position,
+    }
+    ringCount = ringCount + 1
+    local ok = pcall(function()
+        attachment.Parent = part
+        position.Attachment0 = attachment
+        position.Mode = Enum.PositionAlignmentMode.OneAttachment
+        position.Position = part.Position
+        position.MaxForce = 1000000
+        position.MaxVelocity = 150
+        position.Responsiveness = 40
+        position.Parent = part
+        orientation.Attachment0 = attachment
+        orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+        orientation.MaxTorque = 1000000
+        orientation.Responsiveness = 30
+        orientation.Parent = part
+    end)
+    if not ok then removeRingPart(part, true) end
+end
+
+local function discoverRingParts(root, now)
+    ringCharacters = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then table.insert(ringCharacters, player.Character) end
+    end
+    -- Exclude active assemblies from capped queries so they do not consume results.
+    local excluded = {}
+    for _, character in ipairs(ringCharacters) do table.insert(excluded, character) end
+    for part in pairs(ringParts) do table.insert(excluded, part) end
+    ringOverlap.FilterDescendantsInstances = excluded
+    -- Rotate nine local cells, with at most 128 results per discovery tick.
+    -- This also finds existing anchored map parts after they become loose.
+    local x = (ringCell % 3) - 1
+    local z = math.floor(ringCell / 3) - 1
+    ringCell = (ringCell + 1) % 9
+    local center = root.Position + Vector3.new(x * 80, 0, z * 80)
+    for _, part in ipairs(workspace:GetPartBoundsInBox(
+        CFrame.new(center), Vector3.new(80, 240, 80), ringOverlap
+    )) do queueRingPart(part) end
+
+    local ranked = {}
+    for part in pairs(ringCandidates) do
+        ringCandidates[part] = nil
+        ringCandidateCount = ringCandidateCount - 1
+        if isRingPart(part) and (ringRetryAt[part] or 0) <= now then
+            local distance = (part.Position - root.Position).Magnitude
+            if distance <= RING_DISCOVERY_RADIUS then
+                table.insert(ranked, {
+                    part = part,
+                    -- Distance dominates; larger debris wins within nearby groups.
+                    score = distance - math.min(part.Size.Magnitude, 30) * 0.5,
+                })
+            end
+        end
+    end
+    table.sort(ranked, function(a, b) return a.score < b.score end)
+    for _, candidate in ipairs(ranked) do
+        if ringCount >= ringLimit then break end
+        addRingPart(candidate.part, now)
+    end
 end
 
 addCommand({ "ring", "superring" }, "Collect loose debris into a defensive orbit. Usage: ,ring [radius] [speed]", function(_, radiusArg, speedArg)
     ringRadius = math.clamp(tonumber(radiusArg) or ringRadius, 6, 60)
     ringSpeed = math.clamp(tonumber(speedArg) or ringSpeed, 0.2, 12)
+    if ringEnabled then return end
     ringEnabled = true
-    task.spawn(function()
-        local scanAt = 0
-        while running and ringEnabled do
-            local root = getRoot(LocalPlayer)
-            if root then
-                if tick() >= scanAt then
-                    scanAt = tick() + 1
-                    for _, obj in ipairs(workspace:GetDescendants()) do
-                        if isRingPart(obj) then addRingPart(obj) end
-                    end
-                end
-                local active = {}
-                for part, movers in pairs(ringParts) do
-                    if part.Parent and isRingPart(part) then table.insert(active, {part, movers}) else ringParts[part] = nil end
-                end
-                local count = #active
-                local now = tick() * ringSpeed
-                for i, entry in ipairs(active) do
-                    local part, movers = entry[1], entry[2]
-                    local angle = now + ((i - 1) / math.max(count, 1)) * math.pi * 2
-                    local y = math.sin(angle * 2) * 2
-                    movers.position.Position = root.Position + Vector3.new(math.cos(angle) * ringRadius, y, math.sin(angle) * ringRadius)
-                    movers.orientation.CFrame = CFrame.Angles(0, angle, angle * 0.35)
-                    part.AssemblyLinearVelocity = Vector3.zero
-                end
-            end
-            task.wait()
+    ringOverlap = OverlapParams.new()
+    ringOverlap.FilterType = Enum.RaycastFilterType.Exclude
+    ringOverlap.MaxParts = 128
+    table.insert(ringConnections, workspace.DescendantAdded:Connect(queueRingPart))
+    table.insert(ringConnections, workspace.DescendantRemoving:Connect(function(part)
+        if ringCandidates[part] then
+            ringCandidates[part] = nil
+            ringCandidateCount = ringCandidateCount - 1
         end
-    end)
+        removeRingPart(part)
+    end))
+    local elapsed = 0
+    local discoverAt = 0
+    table.insert(ringConnections, game:GetService("RunService").Heartbeat:Connect(function(dt)
+        if not running then stopRing() return end
+        elapsed = elapsed + dt
+        if elapsed < RING_INTERVAL then return end
+        elapsed = elapsed % RING_INTERVAL -- No catch-up burst after a slow frame.
+        local root = getRoot(LocalPlayer)
+        if not root then
+            for part in pairs(ringParts) do removeRingPart(part) end
+            return
+        end
+        local now = tick()
+        for part, movers in pairs(ringParts) do
+            if not isRingPart(part) or part.AssemblyRootPart ~= part
+                or (part.Position - root.Position).Magnitude > RING_RELEASE_DISTANCE then
+                removeRingPart(part)
+            elseif now >= movers.checkAt then
+                local unsafeAssembly = false
+                for _, connected in ipairs(part:GetConnectedParts(true)) do
+                    if not isRingPart(connected) then unsafeAssembly = true break end
+                end
+                local stalled = (part.Position - movers.lastPosition).Magnitude < 1
+                    and (part.Position - movers.target).Magnitude > 12
+                movers.checkAt = now + 3
+                movers.lastPosition = part.Position
+                if unsafeAssembly or not ownsRingPart(part) or stalled then removeRingPart(part, true) end
+            end
+        end
+        if now >= discoverAt then
+            discoverAt = now + 0.5
+            discoverRingParts(root, now)
+        end
+        local i = 0
+        for part, movers in pairs(ringParts) do
+            i = i + 1
+            local angle = now * ringSpeed + ((i - 1) / math.max(ringCount, 1)) * math.pi * 2
+            movers.target = root.Position + Vector3.new(
+                math.cos(angle) * ringRadius, math.sin(angle * 2) * 2, math.sin(angle) * ringRadius
+            )
+            movers.position.Position = movers.target
+            movers.orientation.CFrame = CFrame.Angles(0, angle, angle * 0.35)
+        end
+    end))
+end)
+
+addCommand({ "ringlimit" }, "Set the debris cap. Usage: ,ringlimit <20-150>", function(_, limitArg)
+    local limit = tonumber(limitArg)
+    if not limit or limit ~= limit or math.abs(limit) == math.huge then
+        replyToHost("Usage: ,ringlimit <20-150>")
+        return
+    end
+    ringLimit = math.clamp(math.floor(limit), 20, 150)
+    -- Apply a reduced cap immediately, releasing the farthest/smallest debris first.
+    local root = getRoot(LocalPlayer)
+    local ranked = {}
+    for part in pairs(ringParts) do
+        table.insert(ranked, {
+            part = part,
+            score = (root and (part.Position - root.Position).Magnitude or 0)
+                - math.min(part.Size.Magnitude, 30) * 0.5,
+        })
+    end
+    table.sort(ranked, function(a, b) return a.score < b.score end)
+    for i = ringLimit + 1, #ranked do removeRingPart(ranked[i].part) end
+    replyToHost("Ring debris limit: " .. ringLimit)
 end)
 
 addCommand({ "unring", "stopring" }, "Disable the defensive debris ring.", function()
