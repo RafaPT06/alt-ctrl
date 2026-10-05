@@ -99,3 +99,17 @@ Starting another movement mode cancels the current fun mode. The animated modes 
 If a new command works or appears in `,help` but also receives “not found”, an older script copy may still be listening. Send `,end` from the host, wait for the close reply(s), then load the latest script exactly once on the alt. Rejoining the alt provides a clean reset if an old copy remains.
 
 From v3.21 onward, loading the script replaces the previous v3.21+ runtime in the same executor environment. Reload and `,end` disconnect chat/player listeners and stop movement, the debris ring, and god-mode callbacks. Older releases cannot be auto-replaced because they did not register a runtime handle; stop them once before upgrading.
+
+## Super Ring (v3.22)
+
+`,ring [radius] [speed] [height]` now uses the swirling debris motion from the supplied Lil0darkie6 Rings v8 reference, replacing the old evenly spaced defensive orbit. `,superring` is an alias.
+
+- Defaults: radius **50 studs**, speed **0.5 radians/second**, height scale **100 studs**.
+- Bounds: radius **6–100**, speed **0.2–12**, height scale **10–150**. Height is the reference's vertical folding scale, not a guaranteed tornado height: debris already level with the alt stays level.
+- Example: `,ring 50 0.5 100`.
+- `,ringlimit 80` sets the debris cap (20–150; default 80 controlled assemblies).
+- `,unring` / `,stopring` stop the effect and restore captured collision and physical properties. Debris is temporarily made non-colliding and lightweight.
+- Updates stay near 25 Hz, with local bounded discovery and player/accessory exclusions. Repeating `,ring` changes settings without starting another loop.
+- Motion uses AssemblyLinearVelocity with a 1000-studs/second ceiling and a target-distance speed limit to prevent overshoot at the lower update rate. Angular speed is elapsed-time based.
+
+This integrates the reference's motion into host chat control; the reference's GUI, sounds, promotional chat, global Network state, and hidden SimulationRadius changes are not included. Only debris the client can control will respond; a live game is still required to assess the effect.

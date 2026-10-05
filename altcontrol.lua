@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.21
+    Account Manager v3.22
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.21"
+local VERSION = "3.22"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -1222,8 +1222,9 @@ addCommand({ "ungod", "nogod" }, "Disable god mode.", function()
 end)
 
 local ringEnabled = false
-local ringRadius = 18
-local ringSpeed = 2.5
+local ringRadius = 50
+local ringSpeed = 0.5
+local ringHeight = 100
 local ringLimit = 80
 local ringParts = {}
 local ringConnections = {}
@@ -1238,6 +1239,8 @@ local RING_INTERVAL = 1 / 25
 local RING_DISCOVERY_RADIUS = 120
 local RING_RELEASE_DISTANCE = 240
 local RING_CANDIDATE_LIMIT = 512
+local RING_ATTRACTION_SPEED = 1000
+local ringPhysicalProperties = PhysicalProperties.new(0.01, 0, 0, 0, 0)
 -- Optional executor API; ordinary clients fall back to a movement check.
 local ringOwnerCheck = type(isnetworkowner) == "function" and isnetworkowner or nil
 
@@ -1257,13 +1260,22 @@ local function isRingPart(part)
 end
 
 local function removeRingPart(part, retry)
-    local movers = ringParts[part]
-    if not movers then return end
+    local entry = ringParts[part]
+    if not entry then return end
     ringParts[part] = nil
     ringCount = ringCount - 1
-    for _, object in ipairs({ movers.position, movers.orientation, movers.attachment }) do
-        pcall(function() object:Destroy() end)
+    for affected, original in pairs(entry.originals) do
+        pcall(function()
+            affected.CanCollide = original.canCollide
+            affected.CustomPhysicalProperties = original.physicalProperties
+        end)
     end
+    -- Release the velocity we applied, without restoring an old launch velocity.
+    pcall(function()
+        if part:IsDescendantOf(workspace) and not part.Anchored then
+            part.AssemblyLinearVelocity = Vector3.zero
+        end
+    end)
     if retry then ringRetryAt[part] = tick() + 10 end
 end
 
@@ -1306,41 +1318,66 @@ local function ownsRingPart(part)
 end
 
 local function addRingPart(part, now)
-    if ringCount >= ringLimit or not isRingPart(part) then return end
-    -- Reject assemblies welded to any character/accessory before attaching movers.
-    for _, connected in ipairs(part:GetConnectedParts(true)) do
-        if not isRingPart(connected) then return end
+    if ringParts[part] or ringCount >= ringLimit or not isRingPart(part) then return end
+    local connected = part:GetConnectedParts(true)
+    table.insert(connected, part)
+    -- Keep all player/accessory exclusions, including welded assemblies.
+    for _, affected in ipairs(connected) do
+        if not isRingPart(affected) then return end
     end
     if not ownsRingPart(part) then
         ringRetryAt[part] = now + 10
         return
     end
-    local attachment = Instance.new("Attachment")
-    attachment.Name = "AccountManagerRing"
-    local position = Instance.new("AlignPosition")
-    local orientation = Instance.new("AlignOrientation")
-    -- Register first so partial setup failures can still be fully cleaned up.
-    ringParts[part] = {
-        attachment = attachment, position = position, orientation = orientation,
-        checkAt = now + 3, lastPosition = part.Position, target = part.Position,
+    local entry = {
+        originals = {}, checkAt = now + 3, lastPosition = part.Position,
+        target = part.Position, expectedSpeed = 0,
     }
+    ringParts[part] = entry
     ringCount = ringCount + 1
     local ok = pcall(function()
-        attachment.Parent = part
-        position.Attachment0 = attachment
-        position.Mode = Enum.PositionAlignmentMode.OneAttachment
-        position.Position = part.Position
-        position.MaxForce = 1000000
-        position.MaxVelocity = 150
-        position.Responsiveness = 40
-        position.Parent = part
-        orientation.Attachment0 = attachment
-        orientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
-        orientation.MaxTorque = 1000000
-        orientation.Responsiveness = 30
-        orientation.Parent = part
+        for _, affected in ipairs(connected) do
+            if not entry.originals[affected] then
+                entry.originals[affected] = {
+                    canCollide = affected.CanCollide,
+                    physicalProperties = affected.CustomPhysicalProperties,
+                }
+                affected.CanCollide = false
+                affected.CustomPhysicalProperties = ringPhysicalProperties
+            end
+        end
     end)
     if not ok then removeRingPart(part, true) end
+end
+
+-- Motion adapted from the user's Lil0darkie6 Rings v8 reference.
+-- Speed is radians/second rather than a frame-dependent degree increment.
+local function getSuperRingTarget(position, center, step)
+    local dx = position.X - center.X
+    local dz = position.Z - center.Z
+    local distance = math.sqrt(dx * dx + dz * dz)
+    local angle = math.atan2(dz, dx) + ringSpeed * step
+    local radius = math.min(ringRadius, distance)
+    return Vector3.new(
+        center.X + math.cos(angle) * radius,
+        center.Y + ringHeight * math.abs(math.sin((position.Y - center.Y) / ringHeight)),
+        center.Z + math.sin(angle) * radius
+    )
+end
+
+local function getSuperRingVelocity(position, target, step)
+    local difference = target - position
+    local distance = difference.Magnitude
+    -- The reference normalizes zero vectors; guard that and avoid 25 Hz overshoot.
+    if distance < 0.001 then return Vector3.zero end
+    local speed = math.min(RING_ATTRACTION_SPEED, distance / math.max(step, RING_INTERVAL))
+    return difference.Unit * speed
+end
+
+local function ringNumber(value, default, minimum, maximum)
+    local number = tonumber(value)
+    if not number or number ~= number or math.abs(number) == math.huge then return default end
+    return math.clamp(number, minimum, maximum)
 end
 
 local function discoverRingParts(root, now)
@@ -1379,15 +1416,16 @@ local function discoverRingParts(root, now)
         end
     end
     table.sort(ranked, function(a, b) return a.score < b.score end)
-    for _, candidate in ipairs(ranked) do
-        if ringCount >= ringLimit then break end
+    for index, candidate in ipairs(ranked) do
+        if ringCount >= ringLimit or index > 32 then break end
         addRingPart(candidate.part, now)
     end
 end
 
-addCommand({ "ring", "superring" }, "Collect loose debris into a defensive orbit. Usage: ,ring [radius] [speed]", function(_, radiusArg, speedArg)
-    ringRadius = math.clamp(tonumber(radiusArg) or ringRadius, 6, 60)
-    ringSpeed = math.clamp(tonumber(speedArg) or ringSpeed, 0.2, 12)
+addCommand({ "ring", "superring" }, "Super-ring debris swirl. Usage: ,ring [radius] [speed] [height]", function(_, radiusArg, speedArg, heightArg)
+    ringRadius = ringNumber(radiusArg, ringRadius, 6, 100)
+    ringSpeed = ringNumber(speedArg, ringSpeed, 0.2, 12)
+    ringHeight = ringNumber(heightArg, ringHeight, 10, 150)
     if ringEnabled then return end
     ringEnabled = true
     ringOverlap = OverlapParams.new()
@@ -1407,6 +1445,7 @@ addCommand({ "ring", "superring" }, "Collect loose debris into a defensive orbit
         if not running then stopRing() return end
         elapsed = elapsed + dt
         if elapsed < RING_INTERVAL then return end
+        local step = math.min(elapsed, 0.1)
         elapsed = elapsed % RING_INTERVAL -- No catch-up burst after a slow frame.
         local root = getRoot(LocalPlayer)
         if not root then
@@ -1424,7 +1463,7 @@ addCommand({ "ring", "superring" }, "Collect loose debris into a defensive orbit
                     if not isRingPart(connected) then unsafeAssembly = true break end
                 end
                 local stalled = (part.Position - movers.lastPosition).Magnitude < 1
-                    and (part.Position - movers.target).Magnitude > 12
+                    and movers.expectedSpeed > 1
                 movers.checkAt = now + 3
                 movers.lastPosition = part.Position
                 if unsafeAssembly or not ownsRingPart(part) or stalled then removeRingPart(part, true) end
@@ -1434,15 +1473,14 @@ addCommand({ "ring", "superring" }, "Collect loose debris into a defensive orbit
             discoverAt = now + 0.5
             discoverRingParts(root, now)
         end
-        local i = 0
-        for part, movers in pairs(ringParts) do
-            i = i + 1
-            local angle = now * ringSpeed + ((i - 1) / math.max(ringCount, 1)) * math.pi * 2
-            movers.target = root.Position + Vector3.new(
-                math.cos(angle) * ringRadius, math.sin(angle * 2) * 2, math.sin(angle) * ringRadius
-            )
-            movers.position.Position = movers.target
-            movers.orientation.CFrame = CFrame.Angles(0, angle, angle * 0.35)
+        for part, entry in pairs(ringParts) do
+            entry.target = getSuperRingTarget(part.Position, root.Position, step)
+            local ok = pcall(function()
+                local velocity = getSuperRingVelocity(part.Position, entry.target, step)
+                entry.expectedSpeed = velocity.Magnitude
+                part.AssemblyLinearVelocity = velocity
+            end)
+            if not ok then removeRingPart(part, true) end
         end
     end))
 end)
@@ -1469,7 +1507,7 @@ addCommand({ "ringlimit" }, "Set the debris cap. Usage: ,ringlimit <20-150>", fu
     replyToHost("Ring debris limit: " .. ringLimit)
 end)
 
-addCommand({ "unring", "stopring" }, "Disable the defensive debris ring.", function()
+addCommand({ "unring", "stopring" }, "Stop the super ring and restore debris properties.", function()
     stopRing()
 end)
 
