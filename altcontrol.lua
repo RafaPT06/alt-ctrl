@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.19
+    Account Manager v3.20
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.19"
+local VERSION = "3.20"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -244,7 +244,21 @@ local function restoreStandIdle(player)
     end
 end
 
+local function cleanupFunMovement(player)
+    local state = getBotState(player)
+    local humanoid = state.funHumanoid
+    if humanoid and humanoid.Parent then
+        if state.funAutoRotate ~= nil then humanoid.AutoRotate = state.funAutoRotate end
+        if state.funSitting then humanoid.Sit = false end
+        humanoid:Move(Vector3.zero)
+    end
+    state.funHumanoid = nil
+    state.funAutoRotate = nil
+    state.funSitting = nil
+end
+
 local function stopBotMovement(player)
+    cleanupFunMovement(player)
     local state = getBotState(player)
 
     state.token = state.token + 1
@@ -275,6 +289,7 @@ local function stopAllMovement()
 end
 
 local function beginBotMode(player, mode, target)
+    cleanupFunMovement(player)
     local state = getBotState(player)
 
     if state.standAnimationTrack then
@@ -527,35 +542,52 @@ local function addCommand(names, description, callback)
     end
 end
 
-addCommand({ "help", "cmds", "commands" }, "Send the command list to Discord.", function()
-    if reportToDiscord("help") then
+addCommand({ "help", "cmds", "commands" }, "Show commands. Usage: ,help [page or command]", function(_, query)
+    local names = {}
+    local entries = {}
+    for name in pairs(commandInfo) do table.insert(names, name) end
+    table.sort(names)
+    for _, name in ipairs(names) do
+        local info = commandInfo[name]
+        table.insert(entries, {
+            command = PREFIX .. name,
+            aliases = info.aliases,
+            description = info.description,
+        })
+    end
+
+    if query and not tonumber(query) then
+        local wanted = string.lower(query):gsub("^,", "")
+        for _, name in ipairs(names) do
+            local info = commandInfo[name]
+            for _, alias in ipairs(info.aliases) do
+                if alias == wanted then
+                    replyToHost(PREFIX .. name .. ": " .. info.description)
+                    replyToHost("Aliases: " .. PREFIX .. table.concat(info.aliases, " " .. PREFIX))
+                    return
+                end
+            end
+        end
+        replyToHost("Unknown command. Use ,help or ,help <page>.")
         return
     end
 
-    local lines = {
-        "=== Account Manager v" .. VERSION .. " ===",
-        ",bring | ,line <left/right/front/back>",
-        ",follow [player] | ,unfollow",
-        ",stand | ,standdown",
-        ",orbit [player] [speed] [radius] | ,unorbit",
-        ",ws <speed> | ,resetws",
-        ",dance [1/2/3] | ,undance",
-        ",wave | ,cheer | ,laugh | ,point",
-        ",applaud | ,shrug | ,emote <name>",
-        ",say <message> | ,reset | ,rejoin",
-        ",index | ,promo | ,animid | ,meatballify | ,end",
-        ",god | ,ungod | ,ring [radius] [speed] | ,ringlimit <20-150> | ,unring | ,tp | ,spin | ,freeze | ,face | ,float | ,guard",
-        ",crazyorbit | ,launch | ,void | ,return | ,clone",
-        ",copy | ,syncdance | ,dramatic | ,players | ,server",
-    }
-
-    for _, line in ipairs(lines) do
-        if not whisperHost(line) then
-            warn("[Account Manager] Could not whisper help to host.")
-            return
-        end
-        task.wait(0.15)
+    local pageSize = 8
+    local pages = math.max(1, math.ceil(#names / pageSize))
+    local page = tonumber(query) or 1
+    if page ~= page or page % 1 ~= 0 or page < 1 or page > pages then
+        replyToHost("Help page must be a whole number from 1 to " .. pages .. ".")
+        return
     end
+    -- Include the current registry for report consumers; always show private help too.
+    if not query then reportToDiscord("help", { commands = entries }) end
+    replyToHost("AM v" .. VERSION .. " commands (" .. page .. "/" .. pages .. ")")
+    for index = (page - 1) * pageSize + 1, math.min(page * pageSize, #names) do
+        local name = names[index]
+        replyToHost(PREFIX .. name .. ": " .. commandInfo[name].description)
+        task.wait(0.2)
+    end
+    replyToHost("Use ,help <page> or ,help <command> for usage and aliases.")
 end)
 
 addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
@@ -1674,6 +1706,107 @@ addCommand({ "undance", "nodance", "nd", "stopdance" }, "Stop the current emote.
 
     if humanoid then
         humanoid.Jump = true
+    end
+end)
+
+--// Fun movement: shares the normal mode token, so switching modes cancels it.
+local function funNumber(value, default, minimum, maximum)
+    local number = tonumber(value)
+    if not number or number ~= number or math.abs(number) == math.huge then return default end
+    return math.clamp(number, minimum, maximum)
+end
+
+local function startFunMovement(mode, lockFacing, update)
+    local root, humanoid = getRoot(LocalPlayer), getHumanoid(LocalPlayer)
+    if not root or not humanoid or humanoid.Health <= 0 then
+        replyToHost("Character is not ready.")
+        return
+    end
+    if root.Anchored then
+        replyToHost("Use ,unfreeze before starting fun movement.")
+        return
+    end
+    stopBotMovement(LocalPlayer)
+    local token = beginBotMode(LocalPlayer, mode, nil)
+    local state = getBotState(LocalPlayer)
+    state.funHumanoid = humanoid
+    state.funAutoRotate = humanoid.AutoRotate
+    if lockFacing then humanoid.AutoRotate = false end
+    local initial = root.CFrame
+    local started = tick()
+    task.spawn(function()
+        local ok, err = pcall(function()
+            while isModeActive(LocalPlayer, mode, token) do
+                local currentRoot, currentHumanoid = getRoot(LocalPlayer), getHumanoid(LocalPlayer)
+                if currentRoot ~= root or currentHumanoid ~= humanoid
+                    or not root.Parent or humanoid.Health <= 0 or root.Anchored then break end
+                update(root, humanoid, tick() - started, initial)
+                task.wait(0.05)
+            end
+        end)
+        if isModeActive(LocalPlayer, mode, token) then stopBotMovement(LocalPlayer) end
+        if not ok then warn("[Account Manager] Fun movement failed:", mode, err) end
+    end)
+end
+
+addCommand({ "hop", "bunnyhop" }, "Keep hopping. Usage: ,hop [interval 0.4-5]", function(_, intervalArg)
+    local interval = funNumber(intervalArg, 1, 0.4, 5)
+    local nextHop = 0
+    startFunMovement("hop", false, function(_, humanoid, elapsed)
+        if elapsed >= nextHop then
+            nextHop = elapsed + interval
+            humanoid.Jump = true
+        end
+    end)
+end)
+
+addCommand({ "moonwalk" }, "Walk backward while facing forward. Stop with ,stopfun.", function()
+    startFunMovement("moonwalk", true, function(root, humanoid, _, initial)
+        local backward = Vector3.new(-initial.LookVector.X, 0, -initial.LookVector.Z)
+        if backward.Magnitude > 0.001 then humanoid:Move(backward.Unit, false) end
+        root.CFrame = CFrame.new(root.Position) * (initial - initial.Position)
+    end)
+end)
+
+addCommand({ "zigzag" }, "Walk in a zigzag. Usage: ,zigzag [period 0.5-5]", function(_, periodArg)
+    local period = funNumber(periodArg, 2, 0.5, 5)
+    startFunMovement("zigzag", false, function(_, humanoid, elapsed, initial)
+        local direction = initial.LookVector + initial.RightVector * math.sin(elapsed * math.pi * 2 / period)
+        direction = Vector3.new(direction.X, 0, direction.Z)
+        if direction.Magnitude > 0.001 then humanoid:Move(direction.Unit, false) end
+    end)
+end)
+
+addCommand({ "wiggle", "shimmy" }, "Wiggle in place. Usage: ,wiggle [degrees 5-60] [speed 0.5-6]", function(_, degreesArg, speedArg)
+    local degrees = funNumber(degreesArg, 25, 5, 60)
+    local speed = funNumber(speedArg, 2, 0.5, 6)
+    startFunMovement("wiggle", true, function(root, _, elapsed, initial)
+        root.CFrame = CFrame.new(root.Position) * (initial - initial.Position)
+            * CFrame.Angles(0, math.rad(degrees) * math.sin(elapsed * speed * math.pi * 2), 0)
+    end)
+end)
+
+addCommand({ "sit", "chill" }, "Sit down. Stop with ,unsit or ,stopfun.", function()
+    local humanoid = getHumanoid(LocalPlayer)
+    if not humanoid or humanoid.Health <= 0 then replyToHost("Character is not ready.") return end
+    stopBotMovement(LocalPlayer)
+    beginBotMode(LocalPlayer, "sit", nil)
+    local state = getBotState(LocalPlayer)
+    state.funHumanoid = humanoid
+    state.funSitting = true
+    humanoid.Sit = true
+end)
+
+addCommand({ "unsit", "getup" }, "Stand up from sitting.", function()
+    if getBotState(LocalPlayer).mode == "sit" then stopBotMovement(LocalPlayer) end
+    local humanoid = getHumanoid(LocalPlayer)
+    if humanoid then humanoid.Sit = false end
+end)
+
+addCommand({ "stopfun", "unfun" }, "Stop hopping, moonwalking, zigzagging, wiggling, or sitting.", function()
+    local mode = getBotState(LocalPlayer).mode
+    if mode == "hop" or mode == "moonwalk" or mode == "zigzag" or mode == "wiggle" or mode == "sit" then
+        stopBotMovement(LocalPlayer)
     end
 end)
 
