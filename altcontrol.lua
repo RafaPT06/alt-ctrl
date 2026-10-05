@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.20
+    Account Manager v3.21
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.20"
+local VERSION = "3.21"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -86,6 +86,14 @@ local function isManagedLocalAccount()
 end
 
 local running = true
+local shutdownRuntime = nil
+local runtimeEnvironment = _G
+if type(getgenv) == "function" then
+    local ok, environment = pcall(getgenv)
+    if ok and type(environment) == "table" then runtimeEnvironment = environment end
+end
+local RUNTIME_KEY = "__AccountManagerRuntime"
+local runtimeHandle = nil
 local commands = {}
 local commandInfo = {}
 
@@ -812,8 +820,7 @@ addCommand({ "meatballify", "meatball", "gwibard" }, "Run the existing meatballi
 end)
 
 addCommand({ "end", "stop", "quit", "exit", "close" }, "Disable Account Manager commands.", function()
-    stopAllMovement()
-    running = false
+    if shutdownRuntime then shutdownRuntime() end
     replyToHost("Account Manager successfully closed.")
 end)
 
@@ -1182,9 +1189,9 @@ addCommand({ "god", "godmode" }, "NDS-focused damage protection and continuous h
 
     if godConnection then godConnection:Disconnect() end
     godConnection = LocalPlayer.CharacterAdded:Connect(function()
-        if godModeEnabled then
+        if running and godModeEnabled then
             task.wait(0.5)
-            applyGodMode()
+            if running and godModeEnabled then applyGodMode() end
         end
     end)
 
@@ -1867,6 +1874,7 @@ end
 local hostChatConnection = nil
 
 local function connectHostListener()
+    if not running then return false end
     if hostChatConnection then
         pcall(function()
             hostChatConnection:Disconnect()
@@ -1875,7 +1883,8 @@ local function connectHostListener()
     end
 
     if usingTextChatService() then
-        TextChatService.MessageReceived:Connect(function(chatMessage)
+        hostChatConnection = TextChatService.MessageReceived:Connect(function(chatMessage)
+            if not running then return end
             local source = chatMessage.TextSource
             if not source or source.UserId ~= HOST_USER_ID then
                 return
@@ -1914,25 +1923,44 @@ local function connectHostListener()
 end
 
 -- Keep Host current if the main leaves/rejoins the same server.
-Players.PlayerAdded:Connect(function(player)
+local playerAddedConnection = Players.PlayerAdded:Connect(function(player)
+    if not running then return end
     if player.UserId == HOST_USER_ID then
         Host = player
         print("[Account Manager] Host joined: " .. player.Name)
 
         if not usingTextChatService() then
             task.defer(function()
-                connectHostListener()
+                if running then connectHostListener() end
             end)
         end
     end
 end)
 
-Players.PlayerRemoving:Connect(function(player)
+local playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
+    if not running then return end
     if player.UserId == HOST_USER_ID then
         Host = nil
         stopAllMovement()
     end
 end)
+
+-- One active instance per executor environment. Older releases have no handle;
+-- send ,end to stop those once before loading this release.
+shutdownRuntime = function()
+    if not running then return end
+    running = false
+    if hostChatConnection then hostChatConnection:Disconnect() hostChatConnection = nil end
+    playerAddedConnection:Disconnect()
+    playerRemovingConnection:Disconnect()
+    stopAllMovement()
+    stopRing()
+    if godModeEnabled then commands.ungod() end
+    if godConnection then godConnection:Disconnect() godConnection = nil end
+    if runtimeEnvironment[RUNTIME_KEY] == runtimeHandle then
+        runtimeEnvironment[RUNTIME_KEY] = nil
+    end
+end
 
 --// Startup
 
@@ -1951,6 +1979,13 @@ elseif not isManagedLocalAccount() then
         table.concat(ACCOUNTS, ", ")
     )
 else
+    local previousRuntime = runtimeEnvironment[RUNTIME_KEY]
+    if type(previousRuntime) == "table" and type(previousRuntime.stop) == "function" then
+        local ok, err = pcall(previousRuntime.stop)
+        if not ok then warn("[Account Manager] Previous runtime cleanup failed:", err) end
+    end
+    runtimeHandle = { version = VERSION, stop = shutdownRuntime }
+    runtimeEnvironment[RUNTIME_KEY] = runtimeHandle
     -- TextChatService listener filters by HOST_USER_ID, so it can be connected
     -- even if the main has not fully appeared in Players at this exact instant.
     local listenerConnected = connectHostListener()
