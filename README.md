@@ -93,3 +93,9 @@ This document provides an overview of the available commands for managing bots i
 | `,stopfun` / `,unfun` | Stop any of the fun movement modes above. |
 
 Starting another movement mode cancels the current fun mode. The animated modes stop on death, respawn, or an anchored root. Use `,unfreeze` before starting them while frozen.
+
+## Duplicate “command not found” replies (v3.21)
+
+If a new command works or appears in `,help` but also receives “not found”, an older script copy may still be listening. Send `,end` from the host, wait for the close reply(s), then load the latest script exactly once on the alt. Rejoining the alt provides a clean reset if an old copy remains.
+
+From v3.21 onward, loading the script replaces the previous v3.21+ runtime in the same executor environment. Reload and `,end` disconnect chat/player listeners and stop movement, the debris ring, and god-mode callbacks. Older releases cannot be auto-replaced because they did not register a runtime handle; stop them once before upgrading.
