@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.23
+    Account Manager v3.24
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.23"
+local VERSION = "3.24"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -192,6 +192,8 @@ local function getBotState(player)
             savedIdleWeight1 = nil,
             savedIdleWeight2 = nil,
             standObjects = nil,
+            guardStyle = "tactical",
+            guardPoseJoints = nil,
         }
     end
 
@@ -265,8 +267,138 @@ local function cleanupFunMovement(player)
     state.funSitting = nil
 end
 
+local function clearGuardPose(player)
+    local state = getBotState(player)
+    if state.guardPoseJoints then
+        for joint, original in pairs(state.guardPoseJoints) do
+            if joint and joint.Parent then
+                pcall(function() joint.Transform = original end)
+            end
+        end
+        state.guardPoseJoints = nil
+    end
+end
+
+local function setGuardPose(player, enabled)
+    local state = getBotState(player)
+    if not enabled or state.guardStyle ~= "tactical" then
+        clearGuardPose(player)
+        return
+    end
+    local character = player and player.Character
+    if not character then return end
+    if not state.guardPoseJoints then state.guardPoseJoints = {} end
+    local joints = state.guardPoseJoints
+    local right = character:FindFirstChild("RightShoulder", true) or character:FindFirstChild("Right Shoulder", true)
+    local left = character:FindFirstChild("LeftShoulder", true) or character:FindFirstChild("Left Shoulder", true)
+    if right and right:IsA("Motor6D") then
+        if joints[right] == nil then joints[right] = right.Transform end
+        right.Transform = CFrame.Angles(math.rad(-18), 0, math.rad(10))
+    end
+    if left and left:IsA("Motor6D") then
+        if joints[left] == nil then joints[left] = left.Transform end
+        left.Transform = CFrame.Angles(math.rad(-12), 0, math.rad(-12))
+    end
+end
+
+local function movementBlocked(player, destination)
+    local root = getRoot(player)
+    if not root then return false end
+    local delta = destination - root.Position
+    if delta.Magnitude < 3 then return false end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local excluded = {}
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other.Character then table.insert(excluded, other.Character) end
+    end
+    params.FilterDescendantsInstances = excluded
+    return workspace:Raycast(root.Position + Vector3.new(0, 1.5, 0), delta.Unit * math.min(delta.Magnitude, 8), params) ~= nil
+end
+
+local function startNaturalFollow(player, mode, target, offset, stopRadius, token, useGuardPose)
+    task.spawn(function()
+        local lastPosition = nil
+        local lastProgressAt = tick()
+        local pathWaypoints = nil
+        local pathIndex = 1
+        local pathExpires = 0
+
+        while isModeActive(player, mode, token) do
+            local root, humanoid, targetRoot = getRoot(player), getHumanoid(player), getRoot(target)
+            if root and humanoid and targetRoot then
+                humanoid.AutoRotate = true
+                local desired = targetRoot.CFrame * offset
+                local distance = (root.Position - desired.Position).Magnitude
+
+                if distance > 90 then
+                    clearGuardPose(player)
+                    root.CFrame = desired
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                    pathWaypoints = nil
+                    lastPosition = root.Position
+                    lastProgressAt = tick()
+                elseif distance <= stopRadius then
+                    humanoid:Move(Vector3.zero)
+                    pathWaypoints = nil
+                    if useGuardPose then setGuardPose(player, true) end
+                else
+                    if useGuardPose then clearGuardPose(player) end
+                    local now = tick()
+                    if not lastPosition then
+                        lastPosition = root.Position
+                        lastProgressAt = now
+                    elseif (root.Position - lastPosition).Magnitude >= 1.25 then
+                        lastPosition = root.Position
+                        lastProgressAt = now
+                    end
+
+                    local stuck = now - lastProgressAt > 1.0
+                    local blocked = movementBlocked(player, desired.Position)
+                    if (stuck or blocked) and (not pathWaypoints or now >= pathExpires) then
+                        local path = PathfindingService:CreatePath({ AgentCanJump = true })
+                        local ok = pcall(function() path:ComputeAsync(root.Position, desired.Position) end)
+                        if ok and path.Status == Enum.PathStatus.Success then
+                            pathWaypoints = path:GetWaypoints()
+                            pathIndex = math.min(2, #pathWaypoints)
+                            pathExpires = now + 1.5
+                            lastProgressAt = now
+                        else
+                            pathWaypoints = nil
+                        end
+                    end
+
+                    local waypoint = pathWaypoints and pathWaypoints[pathIndex]
+                    if waypoint and now < pathExpires then
+                        if (root.Position - waypoint.Position).Magnitude < 2.5 then
+                            pathIndex = pathIndex + 1
+                            waypoint = pathWaypoints[pathIndex]
+                        end
+                        if waypoint then
+                            if waypoint.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
+                            humanoid:MoveTo(waypoint.Position)
+                        else
+                            pathWaypoints = nil
+                            humanoid:MoveTo(desired.Position)
+                        end
+                    else
+                        pathWaypoints = nil
+                        humanoid:MoveTo(desired.Position)
+                    end
+                end
+            else
+                clearGuardPose(player)
+            end
+            task.wait(0.2)
+        end
+        clearGuardPose(player)
+    end)
+end
+
 local function stopBotMovement(player)
     cleanupFunMovement(player)
+    clearGuardPose(player)
     local state = getBotState(player)
 
     state.token = state.token + 1
@@ -298,6 +430,7 @@ end
 
 local function beginBotMode(player, mode, target)
     cleanupFunMovement(player)
+    clearGuardPose(player)
     local state = getBotState(player)
 
     if state.standAnimationTrack then
@@ -1068,84 +1201,23 @@ addCommand({ "stand" }, "Float behind the host.", function()
     end
 end)
 
-addCommand({ "follow", "track", "watch" }, "Follow a player using pathfinding.", function(_, ...)
+addCommand({ "follow", "track", "watch" }, "Naturally follow about 5 studs behind a player.", function(_, ...)
     local targetName = table.concat({ ... }, " ")
     local target = findPlayer(targetName)
-
-    if not target then
-        replyToHost("Target not found.")
-        return
-    end
-
+    if not target then replyToHost("Target not found.") return end
     local bots = getManagedBots()
-
-    if #bots == 0 then
-        replyToHost("No accounts available to follow.")
-        return
-    end
-
+    if #bots == 0 then replyToHost("No accounts available to follow.") return end
     for _, entry in ipairs(bots) do
         local bot = entry.player
         local token = beginBotMode(bot, "follow", target)
-
-        task.spawn(function()
-            while isModeActive(bot, "follow", token) do
-                local botRoot = getRoot(bot)
-                local humanoid = getHumanoid(bot)
-                local targetRoot = getRoot(target)
-
-                if botRoot and humanoid and targetRoot then
-                    local distance = (targetRoot.Position - botRoot.Position).Magnitude
-
-                    -- Avoid constantly pathfinding while already close.
-                    if distance > 5 then
-                        local path = PathfindingService:CreatePath({
-                            AgentCanJump = true,
-                        })
-
-                        local ok = pcall(function()
-                            path:ComputeAsync(
-                                botRoot.Position,
-                                targetRoot.Position
-                            )
-                        end)
-
-                        if ok and path.Status == Enum.PathStatus.Success then
-                            local waypoints = path:GetWaypoints()
-
-                            -- Move only toward the next useful waypoint.
-                            -- The loop then recalculates for the moving target.
-                            local waypoint = waypoints[2] or waypoints[1]
-
-                            if waypoint then
-                                if waypoint.Action == Enum.PathWaypointAction.Jump then
-                                    humanoid.Jump = true
-                                end
-
-                                humanoid:MoveTo(waypoint.Position)
-                            end
-                        else
-                            -- Simple fallback when pathfinding cannot produce a path.
-                            humanoid:MoveTo(targetRoot.Position)
-                        end
-                    else
-                        humanoid:MoveTo(botRoot.Position)
-                    end
-                end
-
-                task.wait(0.25)
-            end
-        end)
+        startNaturalFollow(bot, "follow", target, CFrame.new(0, 0, 5), 2.75, token, false)
     end
 end)
 
 addCommand({ "unfollow", "untrack", "unwatch", "standdown" }, "Stop follow/stand movement.", function()
     for _, entry in ipairs(getManagedBots()) do
         local state = getBotState(entry.player)
-
-        if state.mode == "follow" or state.mode == "stand" then
-            stopBotMovement(entry.player)
-        end
+        if state.mode == "follow" or state.mode == "stand" then stopBotMovement(entry.player) end
     end
 end)
 
@@ -1732,21 +1804,23 @@ addCommand({ "unfloat", "unhover" }, "Stop hovering.", function()
     if getBotState(LocalPlayer).mode == "float" then stopBotMovement(LocalPlayer) end
 end)
 
-addCommand({ "guard", "bodyguard" }, "Guard a player from behind.", function(_, ...)
+addCommand({ "guard", "bodyguard" }, "Guard a player from a tactical rear-right position.", function(_, ...)
     local target = resolveTargetFromArgs(...)
     if not target then return end
     local token = beginBotMode(LocalPlayer, "guard", target)
-    task.spawn(function()
-        while isModeActive(LocalPlayer, "guard", token) do
-            local root, humanoid, targetRoot = getRoot(LocalPlayer), getHumanoid(LocalPlayer), getRoot(target)
-            if root and humanoid and targetRoot then
-                local destination = (targetRoot.CFrame * CFrame.new(2.5, 0, 4)).Position
-                if (root.Position - destination).Magnitude > 4 then humanoid:MoveTo(destination) end
-                if (root.Position - destination).Magnitude > 40 then root.CFrame = CFrame.new(destination) end
-            end
-            task.wait(0.15)
-        end
-    end)
+    startNaturalFollow(LocalPlayer, "guard", target, CFrame.new(3, 0, 3.5), 2.5, token, true)
+end)
+
+addCommand({ "guardstyle" }, "Set guard idle style. Usage: ,guardstyle tactical/normal", function(_, styleArg)
+    local style = string.lower(tostring(styleArg or ""))
+    if style ~= "tactical" and style ~= "normal" then
+        replyToHost("Usage: ,guardstyle tactical/normal")
+        return
+    end
+    local state = getBotState(LocalPlayer)
+    state.guardStyle = style
+    if style == "normal" then clearGuardPose(LocalPlayer) end
+    replyToHost("Guard style set to " .. style .. ".")
 end)
 
 addCommand({ "unguard", "stopguard" }, "Stop guarding.", function()
