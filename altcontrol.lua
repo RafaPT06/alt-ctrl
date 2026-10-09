@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.22
+    Account Manager v3.23
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.22"
+local VERSION = "3.23"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
@@ -1235,6 +1235,13 @@ local ringCharacters = {}
 local ringOverlap = nil
 local ringCell = 4
 local ringCount = 0
+local ringGeneration = 0
+local ringWatch = {}
+local ringWatchCount = 0
+local ringStats = { scanned = 0, rejected = 0, stalled = 0 }
+local ringLastError = nil
+local ringControl = nil
+local ringControlStatus = "not started"
 local RING_INTERVAL = 1 / 25
 local RING_DISCOVERY_RADIUS = 120
 local RING_RELEASE_DISTANCE = 240
@@ -1244,11 +1251,11 @@ local ringPhysicalProperties = PhysicalProperties.new(0.01, 0, 0, 0, 0)
 -- Optional executor API; ordinary clients fall back to a movement check.
 local ringOwnerCheck = type(isnetworkowner) == "function" and isnetworkowner or nil
 
-local function isRingPart(part)
+local function isRingPart(part, allowAnchored)
     if not part:IsA("BasePart") or not part:IsDescendantOf(workspace)
-        or part.Anchored or part.Size.Magnitude > 45 then return false end
+        or (part.Anchored and not allowAnchored) or part.Size.Magnitude > 45 then return false end
     local assembly = part.AssemblyRootPart
-    if not assembly or assembly.Anchored then return false end
+    if not assembly or (assembly.Anchored and not allowAnchored) then return false end
     local ancestor = part.Parent
     while ancestor and ancestor ~= workspace do
         if ancestor:IsA("Accessory") or ancestor:IsA("Tool")
@@ -1279,8 +1286,52 @@ local function removeRingPart(part, retry)
     if retry then ringRetryAt[part] = tick() + 10 end
 end
 
+local function refreshRingControl()
+    if not ringControl then return end
+    if ringControl.radiusSaved then
+        local ok = pcall(sethiddenproperty, LocalPlayer, "SimulationRadius", RING_RELEASE_DISTANCE)
+        if not ok then ringControlStatus = "radius update failed" end
+    end
+end
+
+local function beginRingControl()
+    ringControl = {}
+    -- The reference uses infinite range; keep acquisition local and reversible.
+    if type(sethiddenproperty) == "function" then
+        local ok, radius = pcall(function()
+            if type(gethiddenproperty) == "function" then
+                return gethiddenproperty(LocalPlayer, "SimulationRadius")
+            end
+            return LocalPlayer.SimulationRadius
+        end)
+        if ok and type(radius) == "number" then
+            ringControl.radiusSaved = true
+            ringControl.radius = radius
+        end
+    end
+    local ok, focus = pcall(function() return LocalPlayer.ReplicationFocus end)
+    if ok then
+        ringControl.focus = focus
+        ringControl.focusSaved = pcall(function() LocalPlayer.ReplicationFocus = getRoot(LocalPlayer) end)
+    end
+    ringControlStatus = ringControl.radiusSaved and "local control requested" or "simulation API unavailable"
+    refreshRingControl()
+end
+
+local function restoreRingControl()
+    if not ringControl then return end
+    if ringControl.radiusSaved then
+        pcall(sethiddenproperty, LocalPlayer, "SimulationRadius", ringControl.radius)
+    end
+    if ringControl.focusSaved then
+        pcall(function() LocalPlayer.ReplicationFocus = ringControl.focus end)
+    end
+    ringControl = nil
+end
+
 local function stopRing()
     ringEnabled = false
+    ringGeneration = ringGeneration + 1
     for _, connection in ipairs(ringConnections) do connection:Disconnect() end
     ringConnections = {}
     for part in pairs(ringParts) do removeRingPart(part) end
@@ -1290,6 +1341,9 @@ local function stopRing()
     ringCharacters = {}
     ringOverlap = nil
     ringCell = 4
+    ringWatch = {}
+    ringWatchCount = 0
+    restoreRingControl()
 end
 
 local function queueRingPart(part)
@@ -1305,6 +1359,18 @@ local function queueRingPart(part)
         ringCandidates[part] = true
         ringCandidateCount = ringCandidateCount + 1
     end
+end
+
+local function trackRingPart(part)
+    if not ringEnabled or not part:IsA("BasePart") then return end
+    local root = getRoot(LocalPlayer)
+    if not root or not isRingPart(part, true)
+        or (part.Position - root.Position).Magnitude > RING_DISCOVERY_RADIUS then return end
+    if not ringWatch[part] and ringWatchCount < RING_CANDIDATE_LIMIT then
+        ringWatch[part] = true
+        ringWatchCount = ringWatchCount + 1
+    end
+    queueRingPart(part)
 end
 
 local function ownsRingPart(part)
@@ -1325,17 +1391,14 @@ local function addRingPart(part, now)
     for _, affected in ipairs(connected) do
         if not isRingPart(affected) then return end
     end
-    if not ownsRingPart(part) then
-        ringRetryAt[part] = now + 10
-        return
-    end
+    -- Give automatic ownership a chance after local control is requested.
     local entry = {
-        originals = {}, checkAt = now + 3, lastPosition = part.Position,
+        originals = {}, checkAt = now + 6, lastPosition = part.Position, travelled = 0,
         target = part.Position, expectedSpeed = 0,
     }
     ringParts[part] = entry
     ringCount = ringCount + 1
-    local ok = pcall(function()
+    local ok, setupError = pcall(function()
         for _, affected in ipairs(connected) do
             if not entry.originals[affected] then
                 entry.originals[affected] = {
@@ -1347,7 +1410,10 @@ local function addRingPart(part, now)
             end
         end
     end)
-    if not ok then removeRingPart(part, true) end
+    if not ok then
+        ringLastError = "Debris setup: " .. tostring(setupError)
+        removeRingPart(part, true)
+    end
 end
 
 -- Motion adapted from the user's Lil0darkie6 Rings v8 reference.
@@ -1381,6 +1447,15 @@ local function ringNumber(value, default, minimum, maximum)
 end
 
 local function discoverRingParts(root, now)
+    refreshRingControl()
+    for part in pairs(ringWatch) do
+        if not isRingPart(part, true) or (part.Position - root.Position).Magnitude > RING_DISCOVERY_RADIUS then
+            ringWatch[part] = nil
+            ringWatchCount = ringWatchCount - 1
+        else
+            queueRingPart(part)
+        end
+    end
     ringCharacters = {}
     for _, player in ipairs(Players:GetPlayers()) do
         if player.Character then table.insert(ringCharacters, player.Character) end
@@ -1398,7 +1473,7 @@ local function discoverRingParts(root, now)
     local center = root.Position + Vector3.new(x * 80, 0, z * 80)
     for _, part in ipairs(workspace:GetPartBoundsInBox(
         CFrame.new(center), Vector3.new(80, 240, 80), ringOverlap
-    )) do queueRingPart(part) end
+    )) do trackRingPart(part) end
 
     local ranked = {}
     for part in pairs(ringCandidates) do
@@ -1426,63 +1501,121 @@ addCommand({ "ring", "superring" }, "Super-ring debris swirl. Usage: ,ring [radi
     ringRadius = ringNumber(radiusArg, ringRadius, 6, 100)
     ringSpeed = ringNumber(speedArg, ringSpeed, 0.2, 12)
     ringHeight = ringNumber(heightArg, ringHeight, 10, 150)
-    if ringEnabled then return end
+    if ringEnabled then replyToHost("Ring settings updated. Use ,ringstatus to check debris.") return end
+    if not getRoot(LocalPlayer) then replyToHost("Ring: character is not ready.") return end
     ringEnabled = true
+    ringGeneration = ringGeneration + 1
+    local generation = ringGeneration
+    ringStats = { scanned = 0, rejected = 0, stalled = 0 }
+    ringLastError = nil
+    beginRingControl()
     ringOverlap = OverlapParams.new()
     ringOverlap.FilterType = Enum.RaycastFilterType.Exclude
     ringOverlap.MaxParts = 128
-    table.insert(ringConnections, workspace.DescendantAdded:Connect(queueRingPart))
+    table.insert(ringConnections, workspace.DescendantAdded:Connect(trackRingPart))
     table.insert(ringConnections, workspace.DescendantRemoving:Connect(function(part)
         if ringCandidates[part] then
             ringCandidates[part] = nil
             ringCandidateCount = ringCandidateCount - 1
         end
+        if ringWatch[part] then ringWatch[part] = nil ringWatchCount = ringWatchCount - 1 end
         removeRingPart(part)
     end))
     local elapsed = 0
     local discoverAt = 0
     table.insert(ringConnections, game:GetService("RunService").Heartbeat:Connect(function(dt)
-        if not running then stopRing() return end
-        elapsed = elapsed + dt
-        if elapsed < RING_INTERVAL then return end
-        local step = math.min(elapsed, 0.1)
-        elapsed = elapsed % RING_INTERVAL -- No catch-up burst after a slow frame.
-        local root = getRoot(LocalPlayer)
-        if not root then
-            for part in pairs(ringParts) do removeRingPart(part) end
-            return
-        end
-        local now = tick()
-        for part, movers in pairs(ringParts) do
-            if not isRingPart(part) or part.AssemblyRootPart ~= part
-                or (part.Position - root.Position).Magnitude > RING_RELEASE_DISTANCE then
-                removeRingPart(part)
-            elseif now >= movers.checkAt then
-                local unsafeAssembly = false
-                for _, connected in ipairs(part:GetConnectedParts(true)) do
-                    if not isRingPart(connected) then unsafeAssembly = true break end
-                end
-                local stalled = (part.Position - movers.lastPosition).Magnitude < 1
-                    and movers.expectedSpeed > 1
-                movers.checkAt = now + 3
-                movers.lastPosition = part.Position
-                if unsafeAssembly or not ownsRingPart(part) or stalled then removeRingPart(part, true) end
+        local ok, err = pcall(function()
+            if not running then stopRing() return end
+            elapsed = elapsed + dt
+            if elapsed < RING_INTERVAL then return end
+            local step = math.min(elapsed, 0.1)
+            elapsed = elapsed % RING_INTERVAL -- No catch-up burst after a slow frame.
+            local root = getRoot(LocalPlayer)
+            if not root then
+                for part in pairs(ringParts) do removeRingPart(part) end
+                return
             end
-        end
-        if now >= discoverAt then
-            discoverAt = now + 0.5
-            discoverRingParts(root, now)
-        end
-        for part, entry in pairs(ringParts) do
-            entry.target = getSuperRingTarget(part.Position, root.Position, step)
-            local ok = pcall(function()
-                local velocity = getSuperRingVelocity(part.Position, entry.target, step)
-                entry.expectedSpeed = velocity.Magnitude
-                part.AssemblyLinearVelocity = velocity
-            end)
-            if not ok then removeRingPart(part, true) end
+            local now = tick()
+            for part, movers in pairs(ringParts) do
+                if not isRingPart(part) or part.AssemblyRootPart ~= part
+                    or (part.Position - root.Position).Magnitude > RING_RELEASE_DISTANCE then
+                    removeRingPart(part)
+                elseif now >= movers.checkAt then
+                    local unsafeAssembly = false
+                    for _, connected in ipairs(part:GetConnectedParts(true)) do
+                        if not isRingPart(connected) then unsafeAssembly = true break end
+                    end
+                    local stalled = movers.travelled < 1 and movers.expectedSpeed > 1
+                    movers.checkAt = now + 3
+                    movers.travelled = 0
+                    local owned = ownsRingPart(part)
+                    if not owned then ringStats.rejected = ringStats.rejected + 1 end
+                    if stalled then ringStats.stalled = ringStats.stalled + 1 end
+                    if unsafeAssembly or not owned or stalled then removeRingPart(part, true) end
+                end
+            end
+            if now >= discoverAt then
+                discoverAt = now + 0.5
+                discoverRingParts(root, now)
+            end
+            for part, entry in pairs(ringParts) do
+                entry.travelled = entry.travelled + (part.Position - entry.lastPosition).Magnitude
+                entry.lastPosition = part.Position
+                entry.target = getSuperRingTarget(part.Position, root.Position, step)
+                local ok, motionError = pcall(function()
+                    local velocity = getSuperRingVelocity(part.Position, entry.target, step)
+                    entry.expectedSpeed = velocity.Magnitude
+                    part.AssemblyLinearVelocity = velocity
+                end)
+                if not ok then
+                    ringLastError = "Debris velocity: " .. tostring(motionError)
+                    removeRingPart(part, true)
+                end
+            end
+        end)
+        if not ok then
+            ringLastError = tostring(err)
+            stopRing()
+            warn("[Account Manager] Ring stopped:", err)
+            replyToHost("Ring stopped after an error. Use ,ringstatus for details.")
         end
     end))
+    replyToHost("Ring starting: " .. ringControlStatus .. ". Use ,ringstatus to check debris.")
+    -- One initial snapshot per activation, processed in small batches.
+    -- Finds loose CanQuery=false parts missed by capped spatial queries.
+    task.spawn(function()
+        local ok, err = pcall(function()
+            if not running or not ringEnabled or ringGeneration ~= generation then return end
+            local initial = workspace:GetDescendants()
+            for index, part in ipairs(initial) do
+                if not running or not ringEnabled or ringGeneration ~= generation then return end
+                ringStats.scanned = ringStats.scanned + 1
+                trackRingPart(part)
+                if index % 128 == 0 then task.wait(RING_INTERVAL) end
+            end
+        end)
+        if not ok and ringGeneration == generation then
+            ringLastError = tostring(err)
+            warn("[Account Manager] Initial ring discovery failed:", err)
+        end
+    end)
+    task.delay(7, function()
+        if running and ringEnabled and ringGeneration == generation then
+            replyToHost("Ring: " .. ringCount .. "/" .. ringLimit .. " active; "
+                .. ringStats.rejected .. " ownership rejects; " .. ringStats.stalled .. " stalled.")
+            if ringCount == 0 then
+                replyToHost("No controllable debris yet. Move near loose debris; check ,ringstatus.")
+            end
+        end
+    end)
+end)
+
+addCommand({ "ringstatus" }, "Show ring discovery and part-control status.", function()
+    replyToHost("Ring " .. (ringEnabled and "ON" or "OFF") .. " | active=" .. ringCount .. "/" .. ringLimit
+        .. " | watched=" .. ringWatchCount .. " | scanned=" .. ringStats.scanned)
+    replyToHost("Control: " .. ringControlStatus .. " | rejected=" .. ringStats.rejected
+        .. " | stalled=" .. ringStats.stalled)
+    if ringLastError then replyToHost("Ring error: " .. string.sub(ringLastError, 1, 150)) end
 end)
 
 addCommand({ "ringlimit" }, "Set the debris cap. Usage: ,ringlimit <20-150>", function(_, limitArg)

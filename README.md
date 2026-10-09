@@ -112,4 +112,15 @@ From v3.21 onward, loading the script replaces the previous v3.21+ runtime in th
 - Updates stay near 25 Hz, with local bounded discovery and player/accessory exclusions. Repeating `,ring` changes settings without starting another loop.
 - Motion uses AssemblyLinearVelocity with a 1000-studs/second ceiling and a target-distance speed limit to prevent overshoot at the lower update rate. Angular speed is elapsed-time based.
 
-This integrates the reference's motion into host chat control; the reference's GUI, sounds, promotional chat, global Network state, and hidden SimulationRadius changes are not included. Only debris the client can control will respond; a live game is still required to assess the effect.
+This integrates the reference's motion into host chat control; the reference's GUI, sounds, promotional chat, and global Network state are not included. v3.23 requests a finite local simulation range where supported, as described below. Only debris the client can control will respond; a live game is still required to assess the effect.
+
+## Ring acquisition and diagnostics (v3.23)
+
+- Start `,ring`, wait seven seconds, then use `,ringstatus`. Status includes active assemblies, watched parts, initial discovery progress, ownership rejections, stalled parts, control capability, and the last error.
+- Parts get a six-second acquisition grace period instead of being rejected before the ring can try controlling them.
+- Where `sethiddenproperty` and a readable original SimulationRadius are available (via `gethiddenproperty` or a property read), the ring requests a finite 240-stud simulation radius. The previous radius and replication focus are restored on stop/reload. Missing/rejected APIs are reported; requesting a radius does not guarantee server-authorized ownership.
+- One initial Workspace snapshot is processed in batches of 128 per 0.04 seconds. This covers existing loose parts, including CanQuery=false parts that spatial queries miss. The snapshot itself is a one-time cost per activation, not a repeating scan.
+- Up to 512 nearby parts are watched, including anchored debris that becomes loose later. Ongoing local discovery, the 80-assembly cap, and 25 Hz motion remain bounded.
+- `,unring` also invalidates initial discovery and delayed status tasks, restores affected debris properties, and stops ring connections.
+
+If status says `simulation API unavailable`, the executor cannot support the reversible control request. If ownership rejections persist, the server or another client may control the debris. Move the alt near loose debris and use the status output to diagnose the failure.
