@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24
+    Account Manager v3.24.2
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,8 +15,11 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24"
+local VERSION = "3.24.2"
 local STAND_ANIMATION_ID = "138791542100078"
+local GUARD_IDLE_ANIMATION_ID = "83061898886380"
+local GUARD_WALK_ANIMATION_ID = "98105137336279"
+local GUARD_RUN_ANIMATION_ID = "88321834888120"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedStandAnimationId = nil
 
@@ -194,6 +197,7 @@ local function getBotState(player)
             standObjects = nil,
             guardStyle = "tactical",
             guardPoseJoints = nil,
+            guardAnimationTracks = nil,
         }
     end
 
@@ -301,6 +305,68 @@ local function setGuardPose(player, enabled)
     end
 end
 
+local function stopGuardAnimations(player)
+    local state = getBotState(player)
+    if state.guardAnimationTracks then
+        for _, track in pairs(state.guardAnimationTracks) do
+            if track then
+                pcall(function()
+                    track:Stop(0.15)
+                    track:Destroy()
+                end)
+            end
+        end
+        state.guardAnimationTracks = nil
+    end
+end
+
+local function loadGuardAnimations(player)
+    stopGuardAnimations(player)
+    local humanoid = getHumanoid(player)
+    if not humanoid then return nil end
+    local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid:WaitForChild("Animator", 3)
+    if not animator then return nil end
+
+    local tracks = {}
+    local ids = {
+        idle = GUARD_IDLE_ANIMATION_ID,
+        walk = GUARD_WALK_ANIMATION_ID,
+        run = GUARD_RUN_ANIMATION_ID,
+    }
+    for name, id in pairs(ids) do
+        local animation = Instance.new("Animation")
+        animation.AnimationId = "rbxassetid://" .. id
+        local ok, track = pcall(function() return animator:LoadAnimation(animation) end)
+        animation:Destroy()
+        if ok and track then
+            track.Looped = true
+            track.Priority = Enum.AnimationPriority.Action
+            tracks[name] = track
+        else
+            warn("[Account Manager] Could not load guard " .. name .. " animation:", track)
+        end
+    end
+    getBotState(player).guardAnimationTracks = tracks
+    return tracks
+end
+
+local function playGuardAnimation(player, name)
+    local state = getBotState(player)
+    if state.guardStyle ~= "tactical" then
+        stopGuardAnimations(player)
+        return
+    end
+    local tracks = state.guardAnimationTracks or loadGuardAnimations(player)
+    if not tracks then return end
+    for trackName, track in pairs(tracks) do
+        if trackName == name then
+            if not track.IsPlaying then track:Play(0.15, 1, 1) end
+        elseif track.IsPlaying then
+            track:Stop(0.15)
+        end
+    end
+end
+
 local function movementBlocked(player, destination)
     local root = getRoot(player)
     if not root then return false end
@@ -334,7 +400,7 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                 local distance = (root.Position - desired.Position).Magnitude
 
                 if distance > 90 then
-                    clearGuardPose(player)
+                    if useGuardPose then playGuardAnimation(player, "run") end
                     root.CFrame = desired
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
@@ -344,9 +410,12 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                 elseif distance <= stopRadius then
                     humanoid:Move(Vector3.zero)
                     pathWaypoints = nil
-                    if useGuardPose then setGuardPose(player, true) end
+                    if useGuardPose then playGuardAnimation(player, "idle") end
                 else
-                    if useGuardPose then clearGuardPose(player) end
+                    if useGuardPose then
+                        local speed = root.AssemblyLinearVelocity.Magnitude
+                        playGuardAnimation(player, speed >= 14 and "run" or "walk")
+                    end
                     local now = tick()
                     if not lastPosition then
                         lastPosition = root.Position
@@ -390,17 +459,18 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                     end
                 end
             else
-                clearGuardPose(player)
+                if useGuardPose then stopGuardAnimations(player) end
             end
             task.wait(0.2)
         end
-        clearGuardPose(player)
+        if useGuardPose then stopGuardAnimations(player) end
     end)
 end
 
 local function stopBotMovement(player)
     cleanupFunMovement(player)
     clearGuardPose(player)
+    stopGuardAnimations(player)
     local state = getBotState(player)
 
     state.token = state.token + 1
@@ -433,6 +503,7 @@ end
 local function beginBotMode(player, mode, target)
     cleanupFunMovement(player)
     clearGuardPose(player)
+    stopGuardAnimations(player)
     local state = getBotState(player)
 
     if state.standAnimationTrack then
@@ -1821,7 +1892,12 @@ addCommand({ "guardstyle" }, "Set guard idle style. Usage: ,guardstyle tactical/
     end
     local state = getBotState(LocalPlayer)
     state.guardStyle = style
-    if style == "normal" then clearGuardPose(LocalPlayer) end
+    clearGuardPose(LocalPlayer)
+    if style == "normal" then
+        stopGuardAnimations(LocalPlayer)
+    elseif getBotState(LocalPlayer).mode == "guard" then
+        loadGuardAnimations(LocalPlayer)
+    end
     replyToHost("Guard style set to " .. style .. ".")
 end)
 
