@@ -316,6 +316,8 @@ local function movementBlocked(player, destination)
     return workspace:Raycast(root.Position + Vector3.new(0, 1.5, 0), delta.Unit * math.min(delta.Magnitude, 8), params) ~= nil
 end
 
+local isModeActive
+
 local function startNaturalFollow(player, mode, target, offset, stopRadius, token, useGuardPose)
     task.spawn(function()
         local lastPosition = nil
@@ -451,7 +453,7 @@ local function beginBotMode(player, mode, target)
     return state.token
 end
 
-local function isModeActive(player, mode, token)
+isModeActive = function(player, mode, token)
     local state = getBotState(player)
 
     return running
