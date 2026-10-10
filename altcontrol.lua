@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.2
+    Account Manager v3.24.3
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,40 +15,45 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24.2"
+local VERSION = "3.24.3"
 local STAND_ANIMATION_ID = "138791542100078"
 local GUARD_IDLE_ANIMATION_ID = "83061898886380"
 local GUARD_WALK_ANIMATION_ID = "98105137336279"
 local GUARD_RUN_ANIMATION_ID = "88321834888120"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
-local resolvedStandAnimationId = nil
+local resolvedCatalogAnimations = {}
 
 local function resolveCatalogAnimation(catalogId)
-    if resolvedStandAnimationId then
-        return resolvedStandAnimationId
+    local key = tostring(catalogId)
+    if resolvedCatalogAnimations[key] then
+        return resolvedCatalogAnimations[key]
     end
 
     local ok, objects = pcall(function()
-        return game:GetObjects("rbxassetid://" .. tostring(catalogId))
+        return game:GetObjects("rbxassetid://" .. key)
     end)
 
     if not ok or not objects or not objects[1] then
-        warn("[Account Manager] Could not resolve catalog animation:", catalogId)
+        warn("[Account Manager] Could not resolve catalog animation:", key)
         return nil
     end
 
     local root = objects[1]
     local animation = root:IsA("Animation") and root or root:FindFirstChildWhichIsA("Animation", true)
+    local resolved = animation and animation.AnimationId or nil
 
-    if animation and animation.AnimationId ~= "" then
-        resolvedStandAnimationId = animation.AnimationId
-        print("[Account Manager] Angel idle resolved to:", resolvedStandAnimationId)
+    if resolved and resolved ~= "" then
+        if not string.find(resolved, "rbxassetid://", 1, true) then
+            resolved = "rbxassetid://" .. tostring(resolved):gsub("%D", "")
+        end
+        resolvedCatalogAnimations[key] = resolved
+        print("[Account Manager] Catalog animation " .. key .. " resolved to:", resolved)
     else
-        warn("[Account Manager] Catalog item loaded, but no Animation object was found.")
+        warn("[Account Manager] Catalog item " .. key .. " loaded, but no Animation object was found.")
     end
 
     pcall(function() root:Destroy() end)
-    return resolvedStandAnimationId
+    return resolvedCatalogAnimations[key]
 end
 
 local HOST_USER_ID = 3104567111
@@ -333,17 +338,23 @@ local function loadGuardAnimations(player)
         walk = GUARD_WALK_ANIMATION_ID,
         run = GUARD_RUN_ANIMATION_ID,
     }
-    for name, id in pairs(ids) do
-        local animation = Instance.new("Animation")
-        animation.AnimationId = "rbxassetid://" .. id
-        local ok, track = pcall(function() return animator:LoadAnimation(animation) end)
-        animation:Destroy()
-        if ok and track then
-            track.Looped = true
-            track.Priority = Enum.AnimationPriority.Action
-            tracks[name] = track
+    for name, catalogId in pairs(ids) do
+        local resolvedId = resolveCatalogAnimation(catalogId)
+        if resolvedId then
+            local animation = Instance.new("Animation")
+            animation.AnimationId = resolvedId
+            local ok, track = pcall(function() return animator:LoadAnimation(animation) end)
+            animation:Destroy()
+            if ok and track then
+                track.Looped = true
+                track.Priority = Enum.AnimationPriority.Action
+                tracks[name] = track
+                print("[Account Manager] Guard " .. name .. " loaded:", resolvedId)
+            else
+                warn("[Account Manager] Could not load resolved guard " .. name .. " animation:", track)
+            end
         else
-            warn("[Account Manager] Could not load guard " .. name .. " animation:", track)
+            warn("[Account Manager] Could not resolve guard " .. name .. " catalog item:", catalogId)
         end
     end
     getBotState(player).guardAnimationTracks = tracks
@@ -638,10 +649,11 @@ local function whisperHost(text)
             end
         end
 
-        warn(
-            "[Account Manager] Whisper channel not found for",
+        print(
+            "[Account Manager] Whisper channel not created yet for",
             HOST_USER_ID,
-            LocalPlayer.UserId
+            LocalPlayer.UserId,
+            "- MAIN can send /w " .. LocalPlayer.Name .. " hi once to create it."
         )
 
         return false
