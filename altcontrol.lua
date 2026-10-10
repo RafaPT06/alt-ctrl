@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.8
+    Account Manager v3.24.10
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -989,7 +989,7 @@ addCommand({ "rig", "rigtype" }, "Report the ALT rig type for R6/R15 compatibili
     replyToHost("Rig: " .. rigName .. " | weapon hand: " .. (hand and hand.Name or "missing"))
 end)
 
-addCommand({ "weaponpose", "wp" }, "Test physical rifle alignment and inspect its runtime connection.", function()
+addCommand({ "weaponpose", "wp" }, "Test direct physical rifle control.", function()
     local character = LocalPlayer.Character
     if not character then
         replyToHost("Character not ready.")
@@ -1014,50 +1014,7 @@ addCommand({ "weaponpose", "wp" }, "Test physical rifle alignment and inspect it
         return
     end
 
-    -- Find ANY runtime connection to the rifle handle.
-    print("========== RIFLE CONNECTION SEARCH ==========")
-    print("Accessory:", accessory:GetFullName())
-    print("Handle:", handle:GetFullName())
-
-    local connections = {}
-
-    for _, obj in ipairs(character:GetDescendants()) do
-        if obj:IsA("Weld")
-            or obj:IsA("Motor6D")
-            or obj:IsA("WeldConstraint") then
-
-            if obj.Part0 == handle or obj.Part1 == handle then
-                table.insert(connections, obj)
-
-                print(
-                    "[" .. #connections .. "]",
-                    obj.ClassName,
-                    obj:GetFullName()
-                )
-
-                print(
-                    "    Part0:",
-                    obj.Part0 and obj.Part0:GetFullName() or "nil"
-                )
-
-                print(
-                    "    Part1:",
-                    obj.Part1 and obj.Part1:GetFullName() or "nil"
-                )
-
-                if obj:IsA("Weld") or obj:IsA("Motor6D") then
-                    print("    C0:", obj.C0)
-                    print("    C1:", obj.C1)
-                end
-            end
-        end
-    end
-
-    print("Connections found:", #connections)
-    print("=============================================")
-
     local isR6 = humanoid.RigType == Enum.HumanoidRigType.R6
-
     local hand = character:FindFirstChild(
         isR6 and "Right Arm" or "RightHand"
     )
@@ -1067,141 +1024,78 @@ addCommand({ "weaponpose", "wp" }, "Test physical rifle alignment and inspect it
         return
     end
 
-    -- Clean previous weapon test.
     local state = getBotState(LocalPlayer)
 
+    -- Cancel previous test loop.
     if state.weaponPose then
-        for _, object in ipairs(state.weaponPose.objects or {}) do
-            if object and object.Parent then
-                pcall(function()
-                    object:Destroy()
-                end)
-            end
-        end
-
-        -- Restore connections removed by the previous test.
-        for _, saved in ipairs(state.weaponPose.connections or {}) do
-            if saved.object then
-                pcall(function()
-                    saved.object.Parent = saved.parent
-                end)
-            end
-        end
+        state.weaponPose.active = false
     end
 
-    state.weaponPose = {
-        objects = {},
-        connections = {}
+    local pose = {
+        active = true,
+        handle = handle,
+        hand = hand
     }
 
-    local pose = state.weaponPose
-
-    -- Temporarily detach every connection actually connected
-    -- to the rifle Handle.
-    for _, connection in ipairs(connections) do
-        table.insert(pose.connections, {
-            object = connection,
-            parent = connection.Parent
-        })
-
-        connection.Parent = nil
-    end
+    state.weaponPose = pose
 
     handle.Anchored = false
     handle.CanCollide = false
     handle.Massless = true
 
-    -- Attachment inside rifle.
-    local rifleAttachment = Instance.new("Attachment")
-    rifleAttachment.Name = "AM_RifleAttachment"
-    rifleAttachment.CFrame = CFrame.identity
-    rifleAttachment.Parent = handle
+    task.spawn(function()
+        while running
+            and pose.active
+            and state.weaponPose == pose
+            and handle.Parent
+            and hand.Parent do
 
-    -- Target attachment on right hand/arm.
-    local handAttachment = Instance.new("Attachment")
-    handAttachment.Name = "AM_WeaponTarget"
+            -- Keep the physical Handle awake/moving.
+            handle.AssemblyLinearVelocity = Vector3.new(0, 25, 0)
+            handle.AssemblyAngularVelocity = Vector3.zero
 
-    if isR6 then
-        handAttachment.CFrame =
-            CFrame.new(0, -0.7, -0.7)
-            * CFrame.Angles(
-                math.rad(-90),
-                0,
-                math.rad(90)
-            )
-    else
-        handAttachment.CFrame =
-            CFrame.new(0, -0.25, -0.65)
-            * CFrame.Angles(
-                math.rad(-90),
-                0,
-                math.rad(90)
-            )
-    end
+            local offset
 
-    handAttachment.Parent = hand
+            if isR6 then
+                offset =
+                    CFrame.new(0, -0.8, -0.8)
+                    * CFrame.Angles(
+                        math.rad(-90),
+                        0,
+                        math.rad(90)
+                    )
+            else
+                offset =
+                    CFrame.new(0, -0.35, -0.7)
+                    * CFrame.Angles(
+                        math.rad(-90),
+                        0,
+                        math.rad(90)
+                    )
+            end
 
-    -- Physically move the rifle.
-    local alignPosition = Instance.new("AlignPosition")
-    alignPosition.Name = "AM_RiflePosition"
-    alignPosition.Attachment0 = rifleAttachment
-    alignPosition.Attachment1 = handAttachment
-    alignPosition.Mode = Enum.PositionAlignmentMode.TwoAttachment
+            handle.CFrame = hand.CFrame * offset
 
-    alignPosition.MaxForce = 1000000
-    alignPosition.MaxVelocity = math.huge
-    alignPosition.Responsiveness = 200
-    alignPosition.RigidityEnabled = true
-    alignPosition.ApplyAtCenterOfMass = true
-
-    alignPosition.Parent = handle
-
-    local alignOrientation = Instance.new("AlignOrientation")
-    alignOrientation.Name = "AM_RifleOrientation"
-    alignOrientation.Attachment0 = rifleAttachment
-    alignOrientation.Attachment1 = handAttachment
-    alignOrientation.Mode = Enum.OrientationAlignmentMode.TwoAttachment
-
-    alignOrientation.MaxTorque = 1000000
-    alignOrientation.MaxAngularVelocity = math.huge
-    alignOrientation.Responsiveness = 200
-    alignOrientation.RigidityEnabled = true
-
-    alignOrientation.Parent = handle
-
-    pose.objects = {
-        rifleAttachment,
-        handAttachment,
-        alignPosition,
-        alignOrientation
-    }
-
-    print("========== WEAPONPOSE TEST ==========")
-    print("Rig:", isR6 and "R6" or "R15")
-    print("Connections detached:", #connections)
-    print("Target:", hand:GetFullName())
-    print("=====================================")
+            task.wait()
+        end
+    end)
 
     replyToHost(
-        "Weapon pose test active | "
+        "Direct weapon test active ("
         .. (isR6 and "R6" or "R15")
-        .. " | connections="
-        .. #connections
-        .. ". Check ALT + MAIN."
+        .. "). Check ALT + MAIN."
     )
 end)
 
-addCommand({ "unweaponpose", "unwp" }, "Restore rifle attachment.", function()
+addCommand({ "unweaponpose", "unwp" }, "Stop direct rifle control.", function()
     local state = getBotState(LocalPlayer)
-    local pose = state.weaponPose
 
-    if pose and pose.attachment and pose.attachment.Parent then
-        pose.attachment.CFrame = pose.originalCFrame
+    if state.weaponPose then
+        state.weaponPose.active = false
+        state.weaponPose = nil
     end
 
-    state.weaponPose = nil
-
-    replyToHost("Weapon attachment restored.")
+    replyToHost("Direct weapon test stopped.")
 end)
 
 addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
