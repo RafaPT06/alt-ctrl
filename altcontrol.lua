@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.6
+    Account Manager v3.24.7
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -989,7 +989,7 @@ addCommand({ "rig", "rigtype" }, "Report the ALT rig type for R6/R15 compatibili
     replyToHost("Rig: " .. rigName .. " | weapon hand: " .. (hand and hand.Name or "missing"))
 end)
 
-addCommand({ "weaponpose", "wp" }, "Inspect the rifle attachment setup.", function()
+addCommand({ "weaponpose", "wp" }, "Test rifle BodyBackAttachment positioning.", function()
     local character = LocalPlayer.Character
     if not character then
         replyToHost("Character not ready.")
@@ -1003,64 +1003,51 @@ addCommand({ "weaponpose", "wp" }, "Inspect the rifle attachment setup.", functi
     end
 
     local handle = accessory:FindFirstChild("Handle")
-    if not handle then
-        replyToHost("Rifle found, but Handle is missing.")
+    local attachment = handle and handle:FindFirstChild("BodyBackAttachment")
+
+    if not attachment or not attachment:IsA("Attachment") then
+        replyToHost("BodyBackAttachment not found.")
         return
     end
 
-    print("========== WEAPONPOSE DEBUG ==========")
-    print("Accessory:", accessory:GetFullName())
-    print("Handle:", handle:GetFullName())
-    print("Handle class:", handle.ClassName)
+    local state = getBotState(LocalPlayer)
 
-    local found = 0
-
-    for _, obj in ipairs(handle:GetDescendants()) do
-        if obj:IsA("Weld")
-            or obj:IsA("WeldConstraint")
-            or obj:IsA("Motor6D")
-            or obj:IsA("Attachment") then
-
-            found += 1
-
-            print(
-                "[" .. found .. "]",
-                obj.ClassName,
-                obj.Name,
-                obj:GetFullName()
-            )
-
-            if obj:IsA("Weld") or obj:IsA("Motor6D") then
-                print("    Part0:", obj.Part0 and obj.Part0:GetFullName() or "nil")
-                print("    Part1:", obj.Part1 and obj.Part1:GetFullName() or "nil")
-                print("    C0:", obj.C0)
-                print("    C1:", obj.C1)
-
-            elseif obj:IsA("WeldConstraint") then
-                print("    Part0:", obj.Part0 and obj.Part0:GetFullName() or "nil")
-                print("    Part1:", obj.Part1 and obj.Part1:GetFullName() or "nil")
-
-            elseif obj:IsA("Attachment") then
-                print("    Position:", obj.Position)
-                print("    Orientation:", obj.Orientation)
-            end
-        end
+    if not state.weaponPose then
+        state.weaponPose = {
+            attachment = attachment,
+            originalCFrame = attachment.CFrame
+        }
     end
 
-    print("======================================")
+    -- Deliberately huge offset so replication is obvious.
+    attachment.CFrame =
+        state.weaponPose.originalCFrame
+        * CFrame.new(3, 2, -2)
+        * CFrame.Angles(
+            math.rad(45),
+            math.rad(90),
+            math.rad(30)
+        )
+
+    print("[Account Manager] BodyBackAttachment modified.")
+    print("New CFrame:", attachment.CFrame)
 
     replyToHost(
-        "Rifle debug complete: "
-        .. accessory.Name
-        .. " | found "
-        .. found
-        .. " attachment/connection object(s). Check Delta console."
+        "BodyBackAttachment moved. Check the rifle from MAIN."
     )
 end)
 
-addCommand({ "unweaponpose", "unwp" }, "Restore the rifle after the weapon-pose test.", function()
-    clearWeaponPose(LocalPlayer)
-    replyToHost("Weapon pose cleared.")
+addCommand({ "unweaponpose", "unwp" }, "Restore rifle attachment.", function()
+    local state = getBotState(LocalPlayer)
+    local pose = state.weaponPose
+
+    if pose and pose.attachment and pose.attachment.Parent then
+        pose.attachment.CFrame = pose.originalCFrame
+    end
+
+    state.weaponPose = nil
+
+    replyToHost("Weapon attachment restored.")
 end)
 
 addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
