@@ -8,6 +8,7 @@
       MAIN / PC  = controller only (no executor required)
       ALT / PHONE = executes this script and performs the commands
 
+
     The script only accepts commands from HOST_USER_ID.
     LocalPlayer is always the ALT running this script.
 ]]
