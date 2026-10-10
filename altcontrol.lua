@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.3
+    Account Manager v3.24.4
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -8,7 +8,6 @@
       MAIN / PC  = controller only (no executor required)
       ALT / PHONE = executes this script and performs the commands
 
-
     The script only accepts commands from HOST_USER_ID.
     LocalPlayer is always the ALT running this script.
 ]]
@@ -16,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24.3"
+local VERSION = "3.24.4"
 local STAND_ANIMATION_ID = "138791542100078"
 local GUARD_IDLE_ANIMATION_ID = "83061898886380"
 local GUARD_WALK_ANIMATION_ID = "98105137336279"
@@ -204,6 +203,8 @@ local function getBotState(player)
             guardStyle = "tactical",
             guardPoseJoints = nil,
             guardAnimationTracks = nil,
+            guardAnimationState = nil,
+            effects = {},
         }
     end
 
@@ -324,6 +325,7 @@ local function stopGuardAnimations(player)
         end
         state.guardAnimationTracks = nil
     end
+    state.guardAnimationState = nil
 end
 
 local function loadGuardAnimations(player)
@@ -368,15 +370,64 @@ local function playGuardAnimation(player, name)
         stopGuardAnimations(player)
         return
     end
+
+    -- Do not replay the same looping animation every movement update.
+    if state.guardAnimationState == name then
+        local current = state.guardAnimationTracks and state.guardAnimationTracks[name]
+        if current and current.IsPlaying then return end
+    end
+
     local tracks = state.guardAnimationTracks or loadGuardAnimations(player)
-    if not tracks then return end
+    if not tracks or not tracks[name] then return end
+    if state.guardAnimationState == name and tracks[name].IsPlaying then return end
+
     for trackName, track in pairs(tracks) do
-        if trackName == name then
-            if not track.IsPlaying then track:Play(0.15, 1, 1) end
-        elseif track.IsPlaying then
-            track:Stop(0.15)
+        if trackName ~= name and track.IsPlaying then
+            track:Stop(0.2)
         end
     end
+
+    local track = tracks[name]
+    if not track.IsPlaying then track:Play(0.2, 1, 1) end
+    state.guardAnimationState = name
+end
+
+local function getEffectState(player, name)
+    local state = getBotState(player)
+    state.effects = state.effects or {}
+    return state.effects[name]
+end
+
+local function startEffect(player, name, data)
+    local state = getBotState(player)
+    state.effects = state.effects or {}
+    local previous = state.effects[name]
+    local token = ((previous and previous.token) or 0) + 1
+    data = data or {}
+    data.token = token
+    state.effects[name] = data
+    return token
+end
+
+local function stopEffect(player, name)
+    local state = getBotState(player)
+    state.effects = state.effects or {}
+    local effect = state.effects[name]
+    if effect then
+        effect.token = (effect.token or 0) + 1
+        state.effects[name] = nil
+    end
+end
+
+local function isEffectActive(player, name, token)
+    local effect = getEffectState(player, name)
+    return running and effect ~= nil and effect.token == token
+end
+
+local function clearEffects(player)
+    local state = getBotState(player)
+    state.effects = state.effects or {}
+    for name in pairs(state.effects) do stopEffect(player, name) end
 end
 
 local function movementBlocked(player, destination)
@@ -407,8 +458,12 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
         while isModeActive(player, mode, token) do
             local root, humanoid, targetRoot = getRoot(player), getHumanoid(player), getRoot(target)
             if root and humanoid and targetRoot then
-                humanoid.AutoRotate = true
+                humanoid.AutoRotate = getEffectState(player, "spin") == nil and getEffectState(player, "face") == nil
                 local desired = targetRoot.CFrame * offset
+                local floatEffect = getEffectState(player, "float")
+                if floatEffect then
+                    desired = desired + Vector3.new(0, floatEffect.height or 8, 0)
+                end
                 local distance = (root.Position - desired.Position).Magnitude
 
                 if distance > 90 then
@@ -425,8 +480,13 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                     if useGuardPose then playGuardAnimation(player, "idle") end
                 else
                     if useGuardPose then
-                        local speed = root.AssemblyLinearVelocity.Magnitude
-                        playGuardAnimation(player, speed >= 14 and "run" or "walk")
+                        local speed = Vector3.new(root.AssemblyLinearVelocity.X, 0, root.AssemblyLinearVelocity.Z).Magnitude
+                        local currentGuardState = getBotState(player).guardAnimationState
+                        if currentGuardState == "run" then
+                            playGuardAnimation(player, speed < 10 and "walk" or "run")
+                        else
+                            playGuardAnimation(player, speed > 15 and "run" or "walk")
+                        end
                     end
                     local now = tick()
                     if not lastPosition then
@@ -479,8 +539,9 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
     end)
 end
 
-local function stopBotMovement(player)
+local function stopBotMovement(player, preserveEffects)
     cleanupFunMovement(player)
+    if not preserveEffects then clearEffects(player) end
     clearGuardPose(player)
     stopGuardAnimations(player)
     local state = getBotState(player)
@@ -890,8 +951,6 @@ addCommand({ "bring" }, "Bring managed accounts beside the host.", function()
         local root = getRoot(bot)
 
         if root then
-            stopBotMovement(bot)
-
             local x = (i - (#bots / 2) - 0.5) * 4
             local destination = hostRoot.CFrame * CFrame.new(x, 0, 3)
 
@@ -925,8 +984,6 @@ addCommand({ "line" }, "Line accounts left/right/front/back of the host.", funct
         local root = getRoot(bot)
 
         if root then
-            stopBotMovement(bot)
-
             local offset
 
             if direction == "left" or direction == "l" then
@@ -1004,7 +1061,7 @@ addCommand({ "unorbit", "stoporbit" }, "Stop orbiting.", function()
         local state = getBotState(entry.player)
 
         if state.mode == "orbit" then
-            stopBotMovement(entry.player)
+            stopBotMovement(entry.player, true)
         end
     end
 end)
@@ -1303,7 +1360,7 @@ end)
 addCommand({ "unfollow", "untrack", "unwatch", "standdown" }, "Stop follow/stand movement.", function()
     for _, entry in ipairs(getManagedBots()) do
         local state = getBotState(entry.player)
-        if state.mode == "follow" or state.mode == "stand" then stopBotMovement(entry.player) end
+        if state.mode == "follow" or state.mode == "stand" then stopBotMovement(entry.player, true) end
     end
 end)
 
@@ -1318,509 +1375,25 @@ local function resolveTargetFromArgs(...)
     return target
 end
 
-local godModeEnabled = false
-local godConnection = nil
-
-local function applyGodMode()
-    local character = LocalPlayer.Character
-    local humanoid = getHumanoid(LocalPlayer)
-    if not character or not humanoid then return end
-
-    -- Natural Disaster Survival historically creates a local fall-damage
-    -- controller named FallDamageScript. Remove it whenever it is present.
-    local fallDamage = character:FindFirstChild("FallDamageScript", true)
-    if fallDamage then
-        pcall(function() fallDamage:Destroy() end)
-    end
-
-    pcall(function()
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-        humanoid.MaxHealth = math.huge
-        humanoid.Health = math.huge
-    end)
-end
-
-addCommand({ "god", "godmode" }, "NDS-focused damage protection and continuous health restore.", function()
-    godModeEnabled = true
-    applyGodMode()
-
-    if godConnection then godConnection:Disconnect() end
-    godConnection = LocalPlayer.CharacterAdded:Connect(function()
-        if running and godModeEnabled then
-            task.wait(0.5)
-            if running and godModeEnabled then applyGodMode() end
-        end
-    end)
-
-    task.spawn(function()
-        while running and godModeEnabled do
-            applyGodMode()
-            task.wait(0.05)
-        end
-    end)
-end)
-
-addCommand({ "ungod", "nogod" }, "Disable god mode.", function()
-    godModeEnabled = false
-    if godConnection then
-        godConnection:Disconnect()
-        godConnection = nil
-    end
-
-    local humanoid = getHumanoid(LocalPlayer)
-    if humanoid then
-        pcall(function()
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
-            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-            humanoid.MaxHealth = 100
-            humanoid.Health = math.min(humanoid.Health, 100)
-        end)
-    end
-end)
-
-local ringEnabled = false
-local ringRadius = 50
-local ringSpeed = 0.5
-local ringHeight = 100
-local ringLimit = 80
-local ringParts = {}
-local ringConnections = {}
-local ringCandidates = {}
-local ringCandidateCount = 0
-local ringRetryAt = setmetatable({}, { __mode = "k" })
-local ringCharacters = {}
-local ringOverlap = nil
-local ringCell = 4
-local ringCount = 0
-local ringGeneration = 0
-local ringWatch = {}
-local ringWatchCount = 0
-local ringStats = { scanned = 0, rejected = 0, stalled = 0 }
-local ringLastError = nil
-local ringControl = nil
-local ringControlStatus = "not started"
-local RING_INTERVAL = 1 / 25
-local RING_DISCOVERY_RADIUS = 120
-local RING_RELEASE_DISTANCE = 240
-local RING_CANDIDATE_LIMIT = 512
-local RING_ATTRACTION_SPEED = 1000
-local ringPhysicalProperties = PhysicalProperties.new(0.01, 0, 0, 0, 0)
--- Optional executor API; ordinary clients fall back to a movement check.
-local ringOwnerCheck = type(isnetworkowner) == "function" and isnetworkowner or nil
-
-local function isRingPart(part, allowAnchored)
-    if not part:IsA("BasePart") or not part:IsDescendantOf(workspace)
-        or (part.Anchored and not allowAnchored) or part.Size.Magnitude > 45 then return false end
-    local assembly = part.AssemblyRootPart
-    if not assembly or (assembly.Anchored and not allowAnchored) then return false end
-    local ancestor = part.Parent
-    while ancestor and ancestor ~= workspace do
-        if ancestor:IsA("Accessory") or ancestor:IsA("Tool")
-            or (ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid"))
-            or (ancestor:IsA("Model") and Players:GetPlayerFromCharacter(ancestor)) then return false end
-        ancestor = ancestor.Parent
-    end
-    return true
-end
-
-local function removeRingPart(part, retry)
-    local entry = ringParts[part]
-    if not entry then return end
-    ringParts[part] = nil
-    ringCount = ringCount - 1
-    for affected, original in pairs(entry.originals) do
-        pcall(function()
-            affected.CanCollide = original.canCollide
-            affected.CustomPhysicalProperties = original.physicalProperties
-        end)
-    end
-    -- Release the velocity we applied, without restoring an old launch velocity.
-    pcall(function()
-        if part:IsDescendantOf(workspace) and not part.Anchored then
-            part.AssemblyLinearVelocity = Vector3.zero
-        end
-    end)
-    if retry then ringRetryAt[part] = tick() + 10 end
-end
-
-local function refreshRingControl()
-    if not ringControl then return end
-    if ringControl.radiusSaved then
-        local ok = pcall(sethiddenproperty, LocalPlayer, "SimulationRadius", RING_RELEASE_DISTANCE)
-        if not ok then ringControlStatus = "radius update failed" end
-    end
-end
-
-local function beginRingControl()
-    ringControl = {}
-    -- The reference uses infinite range; keep acquisition local and reversible.
-    if type(sethiddenproperty) == "function" then
-        local ok, radius = pcall(function()
-            if type(gethiddenproperty) == "function" then
-                return gethiddenproperty(LocalPlayer, "SimulationRadius")
-            end
-            return LocalPlayer.SimulationRadius
-        end)
-        if ok and type(radius) == "number" then
-            ringControl.radiusSaved = true
-            ringControl.radius = radius
-        end
-    end
-    local ok, focus = pcall(function() return LocalPlayer.ReplicationFocus end)
-    if ok then
-        ringControl.focus = focus
-        ringControl.focusSaved = pcall(function() LocalPlayer.ReplicationFocus = getRoot(LocalPlayer) end)
-    end
-    ringControlStatus = ringControl.radiusSaved and "local control requested" or "simulation API unavailable"
-    refreshRingControl()
-end
-
-local function restoreRingControl()
-    if not ringControl then return end
-    if ringControl.radiusSaved then
-        pcall(sethiddenproperty, LocalPlayer, "SimulationRadius", ringControl.radius)
-    end
-    if ringControl.focusSaved then
-        pcall(function() LocalPlayer.ReplicationFocus = ringControl.focus end)
-    end
-    ringControl = nil
-end
-
-local function stopRing()
-    ringEnabled = false
-    ringGeneration = ringGeneration + 1
-    for _, connection in ipairs(ringConnections) do connection:Disconnect() end
-    ringConnections = {}
-    for part in pairs(ringParts) do removeRingPart(part) end
-    ringCandidates = {}
-    ringCandidateCount = 0
-    ringRetryAt = setmetatable({}, { __mode = "k" })
-    ringCharacters = {}
-    ringOverlap = nil
-    ringCell = 4
-    ringWatch = {}
-    ringWatchCount = 0
-    restoreRingControl()
-end
-
-local function queueRingPart(part)
-    if not ringEnabled or not part:IsA("BasePart") then return end
-    -- One set of movers per assembly, rather than per welded piece.
-    part = part.AssemblyRootPart or part
-    if ringParts[part] or ringCandidates[part]
-        or (ringRetryAt[part] or 0) > tick() then return end
-    local root = getRoot(LocalPlayer)
-    if not root or not isRingPart(part)
-        or (part.Position - root.Position).Magnitude > RING_DISCOVERY_RADIUS then return end
-    if ringCandidateCount < RING_CANDIDATE_LIMIT then
-        ringCandidates[part] = true
-        ringCandidateCount = ringCandidateCount + 1
-    end
-end
-
-local function trackRingPart(part)
-    if not ringEnabled or not part:IsA("BasePart") then return end
-    local root = getRoot(LocalPlayer)
-    if not root or not isRingPart(part, true)
-        or (part.Position - root.Position).Magnitude > RING_DISCOVERY_RADIUS then return end
-    if not ringWatch[part] and ringWatchCount < RING_CANDIDATE_LIMIT then
-        ringWatch[part] = true
-        ringWatchCount = ringWatchCount + 1
-    end
-    queueRingPart(part)
-end
-
-local function ownsRingPart(part)
-    if not ringOwnerCheck then return true end
-    local ok, owned = pcall(ringOwnerCheck, part)
-    if not ok then
-        ringOwnerCheck = nil
-        return true
-    end
-    return owned == true
-end
-
-local function addRingPart(part, now)
-    if ringParts[part] or ringCount >= ringLimit or not isRingPart(part) then return end
-    local connected = part:GetConnectedParts(true)
-    table.insert(connected, part)
-    -- Keep all player/accessory exclusions, including welded assemblies.
-    for _, affected in ipairs(connected) do
-        if not isRingPart(affected) then return end
-    end
-    -- Give automatic ownership a chance after local control is requested.
-    local entry = {
-        originals = {}, checkAt = now + 6, lastPosition = part.Position, travelled = 0,
-        target = part.Position, expectedSpeed = 0,
-    }
-    ringParts[part] = entry
-    ringCount = ringCount + 1
-    local ok, setupError = pcall(function()
-        for _, affected in ipairs(connected) do
-            if not entry.originals[affected] then
-                entry.originals[affected] = {
-                    canCollide = affected.CanCollide,
-                    physicalProperties = affected.CustomPhysicalProperties,
-                }
-                affected.CanCollide = false
-                affected.CustomPhysicalProperties = ringPhysicalProperties
-            end
-        end
-    end)
-    if not ok then
-        ringLastError = "Debris setup: " .. tostring(setupError)
-        removeRingPart(part, true)
-    end
-end
-
--- Motion adapted from the user's Lil0darkie6 Rings v8 reference.
--- Speed is radians/second rather than a frame-dependent degree increment.
-local function getSuperRingTarget(position, center, step)
-    local dx = position.X - center.X
-    local dz = position.Z - center.Z
-    local distance = math.sqrt(dx * dx + dz * dz)
-    local angle = math.atan2(dz, dx) + ringSpeed * step
-    local radius = math.min(ringRadius, distance)
-    return Vector3.new(
-        center.X + math.cos(angle) * radius,
-        center.Y + ringHeight * math.abs(math.sin((position.Y - center.Y) / ringHeight)),
-        center.Z + math.sin(angle) * radius
-    )
-end
-
-local function getSuperRingVelocity(position, target, step)
-    local difference = target - position
-    local distance = difference.Magnitude
-    -- The reference normalizes zero vectors; guard that and avoid 25 Hz overshoot.
-    if distance < 0.001 then return Vector3.zero end
-    local speed = math.min(RING_ATTRACTION_SPEED, distance / math.max(step, RING_INTERVAL))
-    return difference.Unit * speed
-end
-
-local function ringNumber(value, default, minimum, maximum)
-    local number = tonumber(value)
-    if not number or number ~= number or math.abs(number) == math.huge then return default end
-    return math.clamp(number, minimum, maximum)
-end
-
-local function discoverRingParts(root, now)
-    refreshRingControl()
-    for part in pairs(ringWatch) do
-        if not isRingPart(part, true) or (part.Position - root.Position).Magnitude > RING_DISCOVERY_RADIUS then
-            ringWatch[part] = nil
-            ringWatchCount = ringWatchCount - 1
-        else
-            queueRingPart(part)
-        end
-    end
-    ringCharacters = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player.Character then table.insert(ringCharacters, player.Character) end
-    end
-    -- Exclude active assemblies from capped queries so they do not consume results.
-    local excluded = {}
-    for _, character in ipairs(ringCharacters) do table.insert(excluded, character) end
-    for part in pairs(ringParts) do table.insert(excluded, part) end
-    ringOverlap.FilterDescendantsInstances = excluded
-    -- Rotate nine local cells, with at most 128 results per discovery tick.
-    -- This also finds existing anchored map parts after they become loose.
-    local x = (ringCell % 3) - 1
-    local z = math.floor(ringCell / 3) - 1
-    ringCell = (ringCell + 1) % 9
-    local center = root.Position + Vector3.new(x * 80, 0, z * 80)
-    for _, part in ipairs(workspace:GetPartBoundsInBox(
-        CFrame.new(center), Vector3.new(80, 240, 80), ringOverlap
-    )) do trackRingPart(part) end
-
-    local ranked = {}
-    for part in pairs(ringCandidates) do
-        ringCandidates[part] = nil
-        ringCandidateCount = ringCandidateCount - 1
-        if isRingPart(part) and (ringRetryAt[part] or 0) <= now then
-            local distance = (part.Position - root.Position).Magnitude
-            if distance <= RING_DISCOVERY_RADIUS then
-                table.insert(ranked, {
-                    part = part,
-                    -- Distance dominates; larger debris wins within nearby groups.
-                    score = distance - math.min(part.Size.Magnitude, 30) * 0.5,
-                })
-            end
-        end
-    end
-    table.sort(ranked, function(a, b) return a.score < b.score end)
-    for index, candidate in ipairs(ranked) do
-        if ringCount >= ringLimit or index > 32 then break end
-        addRingPart(candidate.part, now)
-    end
-end
-
-addCommand({ "ring", "superring" }, "Super-ring debris swirl. Usage: ,ring [radius] [speed] [height]", function(_, radiusArg, speedArg, heightArg)
-    ringRadius = ringNumber(radiusArg, ringRadius, 6, 100)
-    ringSpeed = ringNumber(speedArg, ringSpeed, 0.2, 12)
-    ringHeight = ringNumber(heightArg, ringHeight, 10, 150)
-    if ringEnabled then replyToHost("Ring settings updated. Use ,ringstatus to check debris.") return end
-    if not getRoot(LocalPlayer) then replyToHost("Ring: character is not ready.") return end
-    ringEnabled = true
-    ringGeneration = ringGeneration + 1
-    local generation = ringGeneration
-    ringStats = { scanned = 0, rejected = 0, stalled = 0 }
-    ringLastError = nil
-    beginRingControl()
-    ringOverlap = OverlapParams.new()
-    ringOverlap.FilterType = Enum.RaycastFilterType.Exclude
-    ringOverlap.MaxParts = 128
-    table.insert(ringConnections, workspace.DescendantAdded:Connect(trackRingPart))
-    table.insert(ringConnections, workspace.DescendantRemoving:Connect(function(part)
-        if ringCandidates[part] then
-            ringCandidates[part] = nil
-            ringCandidateCount = ringCandidateCount - 1
-        end
-        if ringWatch[part] then ringWatch[part] = nil ringWatchCount = ringWatchCount - 1 end
-        removeRingPart(part)
-    end))
-    local elapsed = 0
-    local discoverAt = 0
-    table.insert(ringConnections, game:GetService("RunService").Heartbeat:Connect(function(dt)
-        local ok, err = pcall(function()
-            if not running then stopRing() return end
-            elapsed = elapsed + dt
-            if elapsed < RING_INTERVAL then return end
-            local step = math.min(elapsed, 0.1)
-            elapsed = elapsed % RING_INTERVAL -- No catch-up burst after a slow frame.
-            local root = getRoot(LocalPlayer)
-            if not root then
-                for part in pairs(ringParts) do removeRingPart(part) end
-                return
-            end
-            local now = tick()
-            for part, movers in pairs(ringParts) do
-                if not isRingPart(part) or part.AssemblyRootPart ~= part
-                    or (part.Position - root.Position).Magnitude > RING_RELEASE_DISTANCE then
-                    removeRingPart(part)
-                elseif now >= movers.checkAt then
-                    local unsafeAssembly = false
-                    for _, connected in ipairs(part:GetConnectedParts(true)) do
-                        if not isRingPart(connected) then unsafeAssembly = true break end
-                    end
-                    local stalled = movers.travelled < 1 and movers.expectedSpeed > 1
-                    movers.checkAt = now + 3
-                    movers.travelled = 0
-                    local owned = ownsRingPart(part)
-                    if not owned then ringStats.rejected = ringStats.rejected + 1 end
-                    if stalled then ringStats.stalled = ringStats.stalled + 1 end
-                    if unsafeAssembly or not owned or stalled then removeRingPart(part, true) end
-                end
-            end
-            if now >= discoverAt then
-                discoverAt = now + 0.5
-                discoverRingParts(root, now)
-            end
-            for part, entry in pairs(ringParts) do
-                entry.travelled = entry.travelled + (part.Position - entry.lastPosition).Magnitude
-                entry.lastPosition = part.Position
-                entry.target = getSuperRingTarget(part.Position, root.Position, step)
-                local ok, motionError = pcall(function()
-                    local velocity = getSuperRingVelocity(part.Position, entry.target, step)
-                    entry.expectedSpeed = velocity.Magnitude
-                    part.AssemblyLinearVelocity = velocity
-                end)
-                if not ok then
-                    ringLastError = "Debris velocity: " .. tostring(motionError)
-                    removeRingPart(part, true)
-                end
-            end
-        end)
-        if not ok then
-            ringLastError = tostring(err)
-            stopRing()
-            warn("[Account Manager] Ring stopped:", err)
-            replyToHost("Ring stopped after an error. Use ,ringstatus for details.")
-        end
-    end))
-    replyToHost("Ring starting: " .. ringControlStatus .. ". Use ,ringstatus to check debris.")
-    -- One initial snapshot per activation, processed in small batches.
-    -- Finds loose CanQuery=false parts missed by capped spatial queries.
-    task.spawn(function()
-        local ok, err = pcall(function()
-            if not running or not ringEnabled or ringGeneration ~= generation then return end
-            local initial = workspace:GetDescendants()
-            for index, part in ipairs(initial) do
-                if not running or not ringEnabled or ringGeneration ~= generation then return end
-                ringStats.scanned = ringStats.scanned + 1
-                trackRingPart(part)
-                if index % 128 == 0 then task.wait(RING_INTERVAL) end
-            end
-        end)
-        if not ok and ringGeneration == generation then
-            ringLastError = tostring(err)
-            warn("[Account Manager] Initial ring discovery failed:", err)
-        end
-    end)
-    task.delay(7, function()
-        if running and ringEnabled and ringGeneration == generation then
-            replyToHost("Ring: " .. ringCount .. "/" .. ringLimit .. " active; "
-                .. ringStats.rejected .. " ownership rejects; " .. ringStats.stalled .. " stalled.")
-            if ringCount == 0 then
-                replyToHost("No controllable debris yet. Move near loose debris; check ,ringstatus.")
-            end
-        end
-    end)
-end)
-
-addCommand({ "ringstatus" }, "Show ring discovery and part-control status.", function()
-    replyToHost("Ring " .. (ringEnabled and "ON" or "OFF") .. " | active=" .. ringCount .. "/" .. ringLimit
-        .. " | watched=" .. ringWatchCount .. " | scanned=" .. ringStats.scanned)
-    replyToHost("Control: " .. ringControlStatus .. " | rejected=" .. ringStats.rejected
-        .. " | stalled=" .. ringStats.stalled)
-    if ringLastError then replyToHost("Ring error: " .. string.sub(ringLastError, 1, 150)) end
-end)
-
-addCommand({ "ringlimit" }, "Set the debris cap. Usage: ,ringlimit <20-150>", function(_, limitArg)
-    local limit = tonumber(limitArg)
-    if not limit or limit ~= limit or math.abs(limit) == math.huge then
-        replyToHost("Usage: ,ringlimit <20-150>")
-        return
-    end
-    ringLimit = math.clamp(math.floor(limit), 20, 150)
-    -- Apply a reduced cap immediately, releasing the farthest/smallest debris first.
-    local root = getRoot(LocalPlayer)
-    local ranked = {}
-    for part in pairs(ringParts) do
-        table.insert(ranked, {
-            part = part,
-            score = (root and (part.Position - root.Position).Magnitude or 0)
-                - math.min(part.Size.Magnitude, 30) * 0.5,
-        })
-    end
-    table.sort(ranked, function(a, b) return a.score < b.score end)
-    for i = ringLimit + 1, #ranked do removeRingPart(ranked[i].part) end
-    replyToHost("Ring debris limit: " .. ringLimit)
-end)
-
-addCommand({ "unring", "stopring" }, "Stop the super ring and restore debris properties.", function()
-    stopRing()
-end)
-
 addCommand({ "tp", "goto" }, "Teleport beside a player.", function(_, ...)
     local target = resolveTargetFromArgs(...)
     local targetRoot = target and getRoot(target)
     local root = getRoot(LocalPlayer)
     if root and targetRoot then
-        stopBotMovement(LocalPlayer)
         root.CFrame = targetRoot.CFrame * CFrame.new(3, 0, 0)
     end
 end)
 
-addCommand({ "spin" }, "Spin in place. Usage: ,spin [speed]", function(_, speedArg)
+addCommand({ "spin" }, "Spin while other compatible movement continues. Usage: ,spin [speed]", function(_, speedArg)
     local root = getRoot(LocalPlayer)
     if not root then return end
     local speed = math.clamp(tonumber(speedArg) or 18, 1, 100)
-    local token = beginBotMode(LocalPlayer, "spin", nil)
+    stopEffect(LocalPlayer, "face") -- facing and spinning both control yaw
+    local token = startEffect(LocalPlayer, "spin", { speed = speed })
     task.spawn(function()
-        while isModeActive(LocalPlayer, "spin", token) do
+        while isEffectActive(LocalPlayer, "spin", token) do
             local currentRoot = getRoot(LocalPlayer)
-            if currentRoot then
+            if currentRoot and not currentRoot.Anchored then
                 currentRoot.CFrame = currentRoot.CFrame * CFrame.Angles(0, math.rad(speed), 0)
             end
             task.wait(0.03)
@@ -1828,31 +1401,29 @@ addCommand({ "spin" }, "Spin in place. Usage: ,spin [speed]", function(_, speedA
     end)
 end)
 
-addCommand({ "unspin", "stopspin" }, "Stop spinning.", function()
-    if getBotState(LocalPlayer).mode == "spin" then stopBotMovement(LocalPlayer) end
+addCommand({ "unspin", "stopspin" }, "Stop spinning without stopping other movement.", function()
+    stopEffect(LocalPlayer, "spin")
 end)
 
-addCommand({ "freeze" }, "Freeze the alt in place.", function()
+addCommand({ "freeze" }, "Freeze the alt in place (pauses positional movement).", function()
     local root = getRoot(LocalPlayer)
-    if not root then return end
-    beginBotMode(LocalPlayer, "freeze", nil)
-    root.Anchored = true
+    if root then root.Anchored = true end
 end)
 
 addCommand({ "unfreeze", "thaw" }, "Unfreeze the alt.", function()
     local root = getRoot(LocalPlayer)
     if root then root.Anchored = false end
-    if getBotState(LocalPlayer).mode == "freeze" then stopBotMovement(LocalPlayer) end
 end)
 
-addCommand({ "face", "stare" }, "Continuously face a player.", function(_, ...)
+addCommand({ "face", "stare" }, "Face a player while compatible movement continues.", function(_, ...)
     local target = resolveTargetFromArgs(...)
     if not target then return end
-    local token = beginBotMode(LocalPlayer, "face", target)
+    stopEffect(LocalPlayer, "spin") -- facing and spinning conflict
+    local token = startEffect(LocalPlayer, "face", { target = target })
     task.spawn(function()
-        while isModeActive(LocalPlayer, "face", token) do
+        while isEffectActive(LocalPlayer, "face", token) do
             local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
-            if root and targetRoot then
+            if root and targetRoot and not root.Anchored then
                 root.CFrame = CFrame.lookAt(root.Position, Vector3.new(targetRoot.Position.X, root.Position.Y, targetRoot.Position.Z))
             end
             task.wait(0.05)
@@ -1860,34 +1431,37 @@ addCommand({ "face", "stare" }, "Continuously face a player.", function(_, ...)
     end)
 end)
 
-addCommand({ "unface", "unstare" }, "Stop facing a player.", function()
-    if getBotState(LocalPlayer).mode == "face" then stopBotMovement(LocalPlayer) end
+addCommand({ "unface", "unstare" }, "Stop facing without stopping other movement.", function()
+    stopEffect(LocalPlayer, "face")
 end)
 
-addCommand({ "float", "hover" }, "Hover above a player. Usage: ,float [player] [height]", function(_, ...)
+addCommand({ "float", "hover" }, "Add a hover height to follow/guard, or hover above a player. Usage: ,float [player] [height]", function(_, ...)
     local args = { ... }
     local height = tonumber(args[#args])
     if height then table.remove(args, #args) else height = 8 end
     height = math.clamp(height, 2, 50)
-    local target = findPlayer(table.concat(args, " "))
-    if not target then target = refreshHost() end
+    local target = findPlayer(table.concat(args, " ")) or refreshHost()
     if not target then replyToHost("Target not found.") return end
-    local token = beginBotMode(LocalPlayer, "float", target)
+    local token = startEffect(LocalPlayer, "float", { target = target, height = height })
     task.spawn(function()
-        while isModeActive(LocalPlayer, "float", token) do
-            local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
-            if root and targetRoot then
-                root.CFrame = CFrame.lookAt(targetRoot.Position + Vector3.new(0, height, 0), targetRoot.Position)
-                root.AssemblyLinearVelocity = Vector3.zero
-                root.AssemblyAngularVelocity = Vector3.zero
+        while isEffectActive(LocalPlayer, "float", token) do
+            local state = getBotState(LocalPlayer)
+            -- Follow/guard consume this effect as a vertical offset themselves.
+            if state.mode ~= "follow" and state.mode ~= "guard" then
+                local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
+                if root and targetRoot and not root.Anchored then
+                    local position = targetRoot.Position + Vector3.new(0, height, 0)
+                    root.CFrame = CFrame.new(position) * (root.CFrame - root.CFrame.Position)
+                    root.AssemblyLinearVelocity = Vector3.zero
+                end
             end
             task.wait(0.05)
         end
     end)
 end)
 
-addCommand({ "unfloat", "unhover" }, "Stop hovering.", function()
-    if getBotState(LocalPlayer).mode == "float" then stopBotMovement(LocalPlayer) end
+addCommand({ "unfloat", "unhover" }, "Stop hovering without stopping other movement.", function()
+    stopEffect(LocalPlayer, "float")
 end)
 
 addCommand({ "guard", "bodyguard" }, "Guard a player from a tactical rear-right position.", function(_, ...)
@@ -1915,7 +1489,7 @@ addCommand({ "guardstyle" }, "Set guard idle style. Usage: ,guardstyle tactical/
 end)
 
 addCommand({ "unguard", "stopguard" }, "Stop guarding.", function()
-    if getBotState(LocalPlayer).mode == "guard" then stopBotMovement(LocalPlayer) end
+    if getBotState(LocalPlayer).mode == "guard" then stopBotMovement(LocalPlayer, true) end
 end)
 
 addCommand({ "crazyorbit", "spiral" }, "Spiral around a player.", function(_, targetArg, speedArg, radiusArg)
@@ -1943,7 +1517,6 @@ end)
 addCommand({ "launch", "yeet" }, "Launch the alt upward. Usage: ,launch [power]", function(_, powerArg)
     local root = getRoot(LocalPlayer)
     if root then
-        stopBotMovement(LocalPlayer)
         local power = math.clamp(tonumber(powerArg) or 110, 25, 300)
         root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, power, root.AssemblyLinearVelocity.Z)
     end
@@ -1953,7 +1526,6 @@ local savedReturnCFrame = nil
 addCommand({ "void" }, "Drop the alt far below the map.", function()
     local root = getRoot(LocalPlayer)
     if root then
-        stopBotMovement(LocalPlayer)
         savedReturnCFrame = root.CFrame
         root.CFrame = root.CFrame - Vector3.new(0, 500, 0)
     end
@@ -1997,7 +1569,7 @@ addCommand({ "copy", "mirror" }, "Mirror a player's movement and jumps.", functi
 end)
 
 addCommand({ "uncopy", "unmirror" }, "Stop mirroring.", function()
-    if getBotState(LocalPlayer).mode == "copy" then stopBotMovement(LocalPlayer) end
+    if getBotState(LocalPlayer).mode == "copy" then stopBotMovement(LocalPlayer, true) end
 end)
 
 addCommand({ "syncdance" }, "Start a dance on this managed alt.", function(_, dance)
