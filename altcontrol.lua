@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.5
+    Account Manager v3.24.6
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24.5"
+local VERSION = "3.24.6"
 local STAND_ANIMATION_ID = "138791542100078"
 local GUARD_IDLE_ANIMATION_ID = "83061898886380"
 local GUARD_WALK_ANIMATION_ID = "98105137336279"
@@ -868,22 +868,12 @@ local function clearWeaponPose(player)
     local pose = state.weaponPose
     if not pose then return end
 
-    if pose.testWeld then
-        pcall(function() pose.testWeld:Destroy() end)
-    end
-
-    if pose.originalWeld and pose.originalWeld.Parent then
+    local weld = pose.originalWeld
+    if weld and weld.Parent then
         pcall(function()
-            pose.originalWeld.Part0 = pose.originalPart0
-            pose.originalWeld.Part1 = pose.originalPart1
-            pose.originalWeld.C0 = pose.originalC0
-            pose.originalWeld.C1 = pose.originalC1
-            pose.originalWeld.Enabled = pose.originalEnabled
+            weld.C0 = pose.originalC0
+            weld.C1 = pose.originalC1
         end)
-    end
-
-    if pose.handle and pose.handle.Parent and pose.originalCFrame then
-        pcall(function() pose.handle.CFrame = pose.originalCFrame end)
     end
 
     state.weaponPose = nil
@@ -907,42 +897,35 @@ local function applyWeaponPose(player)
         return false, "Rifle Handle not found."
     end
 
-    local originalWeld = handle:FindFirstChild("AccessoryWeld")
+    -- IMPORTANT: do not disable/destroy the original AccessoryWeld and do not
+    -- create a second weld. This test changes only the existing accessory weld.
+    local weld = handle:FindFirstChild("AccessoryWeld")
+    if not weld or not weld:IsA("Weld") then
+        return false, "Existing AccessoryWeld not found on the rifle."
+    end
+
     local pose = {
         accessory = accessory,
         handle = handle,
-        originalCFrame = handle.CFrame,
-        originalWeld = originalWeld,
+        originalWeld = weld,
+        originalC0 = weld.C0,
+        originalC1 = weld.C1,
     }
-
-    if originalWeld and originalWeld:IsA("Weld") then
-        pose.originalPart0 = originalWeld.Part0
-        pose.originalPart1 = originalWeld.Part1
-        pose.originalC0 = originalWeld.C0
-        pose.originalC1 = originalWeld.C1
-        pose.originalEnabled = originalWeld.Enabled
-        originalWeld.Enabled = false
-    end
-
-    local weld = Instance.new("Weld")
-    weld.Name = "AccountManagerWeaponPose"
-    weld.Part0 = hand
-    weld.Part1 = handle
-
-    -- Initial test offsets. These are intentionally easy to notice from MAIN.
-    -- Fine alignment comes after we confirm the weld is visible to another client.
-    if rigName == "R6" then
-        weld.C0 = CFrame.new(0, -0.85, -0.35) * CFrame.Angles(math.rad(-90), 0, math.rad(90))
-    else
-        weld.C0 = CFrame.new(0, -0.35, -0.55) * CFrame.Angles(math.rad(-90), 0, math.rad(90))
-    end
-
-    weld.C1 = CFrame.identity
-    weld.Parent = hand
-    pose.testWeld = weld
     getBotState(player).weaponPose = pose
 
-    return true, rigName .. " | " .. accessory.Name
+    -- Large, obvious offset for the replication test. We intentionally leave
+    -- Part0/Part1 and all character Motor6Ds untouched.
+    if rigName == "R6" then
+        weld.C0 = pose.originalC0
+            * CFrame.new(1.5, 0.5, -1.25)
+            * CFrame.Angles(0, math.rad(90), 0)
+    else
+        weld.C0 = pose.originalC0
+            * CFrame.new(1.5, 0.5, -1.25)
+            * CFrame.Angles(0, math.rad(90), 0)
+    end
+
+    return true, rigName .. " | existing AccessoryWeld only | " .. accessory.Name
 end
 
 --// Commands
