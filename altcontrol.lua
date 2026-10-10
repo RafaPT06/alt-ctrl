@@ -830,11 +830,15 @@ local function addCommand(names, description, callback)
     end
 end
 
-addCommand({ "help", "cmds", "commands" }, "Show commands. Usage: ,help [page or command]", function(_, query)
+addCommand({ "help", "cmds", "commands" }, "Send the complete command list to Discord.", function()
     local names = {}
     local entries = {}
-    for name in pairs(commandInfo) do table.insert(names, name) end
+
+    for name in pairs(commandInfo) do
+        table.insert(names, name)
+    end
     table.sort(names)
+
     for _, name in ipairs(names) do
         local info = commandInfo[name]
         table.insert(entries, {
@@ -844,38 +848,10 @@ addCommand({ "help", "cmds", "commands" }, "Show commands. Usage: ,help [page or
         })
     end
 
-    if query and not tonumber(query) then
-        local wanted = string.lower(query):gsub("^,", "")
-        for _, name in ipairs(names) do
-            local info = commandInfo[name]
-            for _, alias in ipairs(info.aliases) do
-                if alias == wanted then
-                    replyToHost(PREFIX .. name .. ": " .. info.description)
-                    replyToHost("Aliases: " .. PREFIX .. table.concat(info.aliases, " " .. PREFIX))
-                    return
-                end
-            end
-        end
-        replyToHost("Unknown command. Use ,help or ,help <page>.")
-        return
+    local sent = reportToDiscord("help", { commands = entries })
+    if not sent then
+        warn("[Account Manager] Could not send help to Discord.")
     end
-
-    local pageSize = 8
-    local pages = math.max(1, math.ceil(#names / pageSize))
-    local page = tonumber(query) or 1
-    if page ~= page or page % 1 ~= 0 or page < 1 or page > pages then
-        replyToHost("Help page must be a whole number from 1 to " .. pages .. ".")
-        return
-    end
-    -- Include the current registry for report consumers; always show private help too.
-    if not query then reportToDiscord("help", { commands = entries }) end
-    replyToHost("AM v" .. VERSION .. " commands (" .. page .. "/" .. pages .. ")")
-    for index = (page - 1) * pageSize + 1, math.min(page * pageSize, #names) do
-        local name = names[index]
-        replyToHost(PREFIX .. name .. ": " .. commandInfo[name].description)
-        task.wait(0.2)
-    end
-    replyToHost("Use ,help <page> or ,help <command> for usage and aliases.")
 end)
 
 addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
