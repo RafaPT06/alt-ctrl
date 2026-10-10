@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.7
+    Account Manager v3.24.8
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -989,10 +989,16 @@ addCommand({ "rig", "rigtype" }, "Report the ALT rig type for R6/R15 compatibili
     replyToHost("Rig: " .. rigName .. " | weapon hand: " .. (hand and hand.Name or "missing"))
 end)
 
-addCommand({ "weaponpose", "wp" }, "Test rifle BodyBackAttachment positioning.", function()
+addCommand({ "weaponpose", "wp" }, "Test physical rifle alignment to the hand.", function()
     local character = LocalPlayer.Character
     if not character then
         replyToHost("Character not ready.")
+        return
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        replyToHost("Humanoid not found.")
         return
     end
 
@@ -1003,37 +1009,124 @@ addCommand({ "weaponpose", "wp" }, "Test rifle BodyBackAttachment positioning.",
     end
 
     local handle = accessory:FindFirstChild("Handle")
-    local attachment = handle and handle:FindFirstChild("BodyBackAttachment")
-
-    if not attachment or not attachment:IsA("Attachment") then
-        replyToHost("BodyBackAttachment not found.")
+    if not handle or not handle:IsA("BasePart") then
+        replyToHost("Rifle Handle not found.")
         return
+    end
+
+    local isR6 = humanoid.RigType == Enum.HumanoidRigType.R6
+    local hand = character:FindFirstChild(
+        isR6 and "Right Arm" or "RightHand"
+    )
+
+    if not hand then
+        replyToHost("Right hand/arm not found.")
+        return
+    end
+
+    -- Clear an older test first.
+    local old = getBotState(LocalPlayer).weaponPose
+    if old then
+        for _, object in ipairs(old.objects or {}) do
+            pcall(function()
+                object:Destroy()
+            end)
+        end
     end
 
     local state = getBotState(LocalPlayer)
 
-    if not state.weaponPose then
-        state.weaponPose = {
-            attachment = attachment,
-            originalCFrame = attachment.CFrame
-        }
+    state.weaponPose = {
+        objects = {},
+        disabledConnections = {}
+    }
+
+    local pose = state.weaponPose
+
+    -- Disable the existing accessory connection without touching
+    -- character Motor6Ds.
+    for _, object in ipairs(handle:GetDescendants()) do
+        if object:IsA("Weld")
+            or object:IsA("WeldConstraint")
+            or object:IsA("Motor6D") then
+
+            table.insert(pose.disabledConnections, {
+                object = object,
+                parent = object.Parent
+            })
+
+            object.Parent = nil
+        end
     end
 
-    -- Deliberately huge offset so replication is obvious.
-    attachment.CFrame =
-        state.weaponPose.originalCFrame
-        * CFrame.new(3, 2, -2)
-        * CFrame.Angles(
-            math.rad(45),
-            math.rad(90),
-            math.rad(30)
-        )
+    handle.Anchored = false
+    handle.CanCollide = false
+    handle.Massless = true
 
-    print("[Account Manager] BodyBackAttachment modified.")
-    print("New CFrame:", attachment.CFrame)
+    -- Attachment on the rifle.
+    local rifleAttachment = Instance.new("Attachment")
+    rifleAttachment.Name = "AM_RifleAttachment"
+    rifleAttachment.Parent = handle
+
+    -- Target attachment on the hand.
+    local handAttachment = Instance.new("Attachment")
+    handAttachment.Name = "AM_WeaponTarget"
+
+    if isR6 then
+        handAttachment.CFrame =
+            CFrame.new(0, -0.7, -0.7)
+            * CFrame.Angles(
+                math.rad(-90),
+                0,
+                math.rad(90)
+            )
+    else
+        handAttachment.CFrame =
+            CFrame.new(0, -0.25, -0.65)
+            * CFrame.Angles(
+                math.rad(-90),
+                0,
+                math.rad(90)
+            )
+    end
+
+    handAttachment.Parent = hand
+
+    -- Physically pull rifle to hand.
+    local alignPosition = Instance.new("AlignPosition")
+    alignPosition.Name = "AM_RiflePosition"
+    alignPosition.Attachment0 = rifleAttachment
+    alignPosition.Attachment1 = handAttachment
+    alignPosition.Mode = Enum.PositionAlignmentMode.TwoAttachment
+    alignPosition.MaxForce = 1000000
+    alignPosition.MaxVelocity = math.huge
+    alignPosition.Responsiveness = 200
+    alignPosition.RigidityEnabled = true
+    alignPosition.ApplyAtCenterOfMass = true
+    alignPosition.Parent = handle
+
+    local alignOrientation = Instance.new("AlignOrientation")
+    alignOrientation.Name = "AM_RifleOrientation"
+    alignOrientation.Attachment0 = rifleAttachment
+    alignOrientation.Attachment1 = handAttachment
+    alignOrientation.Mode = Enum.OrientationAlignmentMode.TwoAttachment
+    alignOrientation.MaxTorque = 1000000
+    alignOrientation.MaxAngularVelocity = math.huge
+    alignOrientation.Responsiveness = 200
+    alignOrientation.RigidityEnabled = true
+    alignOrientation.Parent = handle
+
+    pose.objects = {
+        rifleAttachment,
+        handAttachment,
+        alignPosition,
+        alignOrientation
+    }
 
     replyToHost(
-        "BodyBackAttachment moved. Check the rifle from MAIN."
+        "Physical weapon pose active (" ..
+        (isR6 and "R6" or "R15") ..
+        "). Check MAIN."
     )
 end)
 
