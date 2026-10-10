@@ -989,13 +989,73 @@ addCommand({ "rig", "rigtype" }, "Report the ALT rig type for R6/R15 compatibili
     replyToHost("Rig: " .. rigName .. " | weapon hand: " .. (hand and hand.Name or "missing"))
 end)
 
-addCommand({ "weaponpose", "wp" }, "Test rifle positioning on the current R6/R15 rig.", function()
-    local ok, result = applyWeaponPose(LocalPlayer)
-    if ok then
-        replyToHost("Weapon pose active: " .. result .. ". Check the ALT from MAIN.")
-    else
-        replyToHost("Weapon pose failed: " .. tostring(result))
+addCommand({ "weaponpose", "wp" }, "Inspect the rifle attachment setup.", function()
+    local character = LocalPlayer.Character
+    if not character then
+        replyToHost("Character not ready.")
+        return
     end
+
+    local accessory = findRifleAccessory(character)
+    if not accessory then
+        replyToHost("Rifle accessory not found.")
+        return
+    end
+
+    local handle = accessory:FindFirstChild("Handle")
+    if not handle then
+        replyToHost("Rifle found, but Handle is missing.")
+        return
+    end
+
+    print("========== WEAPONPOSE DEBUG ==========")
+    print("Accessory:", accessory:GetFullName())
+    print("Handle:", handle:GetFullName())
+    print("Handle class:", handle.ClassName)
+
+    local found = 0
+
+    for _, obj in ipairs(handle:GetDescendants()) do
+        if obj:IsA("Weld")
+            or obj:IsA("WeldConstraint")
+            or obj:IsA("Motor6D")
+            or obj:IsA("Attachment") then
+
+            found += 1
+
+            print(
+                "[" .. found .. "]",
+                obj.ClassName,
+                obj.Name,
+                obj:GetFullName()
+            )
+
+            if obj:IsA("Weld") or obj:IsA("Motor6D") then
+                print("    Part0:", obj.Part0 and obj.Part0:GetFullName() or "nil")
+                print("    Part1:", obj.Part1 and obj.Part1:GetFullName() or "nil")
+                print("    C0:", obj.C0)
+                print("    C1:", obj.C1)
+
+            elseif obj:IsA("WeldConstraint") then
+                print("    Part0:", obj.Part0 and obj.Part0:GetFullName() or "nil")
+                print("    Part1:", obj.Part1 and obj.Part1:GetFullName() or "nil")
+
+            elseif obj:IsA("Attachment") then
+                print("    Position:", obj.Position)
+                print("    Orientation:", obj.Orientation)
+            end
+        end
+    end
+
+    print("======================================")
+
+    replyToHost(
+        "Rifle debug complete: "
+        .. accessory.Name
+        .. " | found "
+        .. found
+        .. " attachment/connection object(s). Check Delta console."
+    )
 end)
 
 addCommand({ "unweaponpose", "unwp" }, "Restore the rifle after the weapon-pose test.", function()
