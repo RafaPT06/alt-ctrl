@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.4
+    Account Manager v3.24.5
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,11 +15,12 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24.4"
+local VERSION = "3.24.5"
 local STAND_ANIMATION_ID = "138791542100078"
 local GUARD_IDLE_ANIMATION_ID = "83061898886380"
 local GUARD_WALK_ANIMATION_ID = "98105137336279"
 local GUARD_RUN_ANIMATION_ID = "88321834888120"
+local GUARD_RIFLE_CATALOG_ID = "88720156730514"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedCatalogAnimations = {}
 
@@ -204,6 +205,7 @@ local function getBotState(player)
             guardPoseJoints = nil,
             guardAnimationTracks = nil,
             guardAnimationState = nil,
+            weaponPose = nil,
             effects = {},
         }
     end
@@ -802,6 +804,147 @@ local function reportToDiscord(commandName, data)
 end
 
 
+--// Rig / weapon-pose test
+
+local function getRigInfo(player)
+    local character, humanoid = getCharacter(player)
+    if not character or not humanoid then return nil, nil, nil end
+
+    local rigName = humanoid.RigType == Enum.HumanoidRigType.R6 and "R6" or "R15"
+    local hand = rigName == "R6"
+        and character:FindFirstChild("Right Arm")
+        or character:FindFirstChild("RightHand")
+
+    return rigName, hand, character
+end
+
+local function findRifleAccessory(character)
+    if not character then return nil end
+
+    local catalogId = GUARD_RIFLE_CATALOG_ID
+    local catalogNeedle = string.lower(catalogId)
+
+    for _, child in ipairs(character:GetChildren()) do
+        if child:IsA("Accessory") then
+            local handle = child:FindFirstChild("Handle")
+            if handle then
+                local name = string.lower(child.Name)
+                if string.find(name, "rifle", 1, true)
+                    or string.find(name, "gun", 1, true)
+                    or string.find(name, catalogNeedle, 1, true) then
+                    return child
+                end
+            end
+        end
+    end
+
+    -- Fallback: if the avatar only has one accessory with a Handle, use it
+    -- only when its mesh/texture metadata contains the configured catalog id.
+    for _, child in ipairs(character:GetChildren()) do
+        if child:IsA("Accessory") then
+            local handle = child:FindFirstChild("Handle")
+            if handle then
+                local mesh = handle:FindFirstChildOfClass("SpecialMesh")
+                local values = {
+                    handle:IsA("MeshPart") and handle.MeshId or "",
+                    handle:IsA("MeshPart") and handle.TextureID or "",
+                    mesh and mesh.MeshId or "",
+                    mesh and mesh.TextureId or "",
+                }
+                for _, value in ipairs(values) do
+                    if string.find(string.lower(tostring(value)), catalogNeedle, 1, true) then
+                        return child
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function clearWeaponPose(player)
+    local state = getBotState(player)
+    local pose = state.weaponPose
+    if not pose then return end
+
+    if pose.testWeld then
+        pcall(function() pose.testWeld:Destroy() end)
+    end
+
+    if pose.originalWeld and pose.originalWeld.Parent then
+        pcall(function()
+            pose.originalWeld.Part0 = pose.originalPart0
+            pose.originalWeld.Part1 = pose.originalPart1
+            pose.originalWeld.C0 = pose.originalC0
+            pose.originalWeld.C1 = pose.originalC1
+            pose.originalWeld.Enabled = pose.originalEnabled
+        end)
+    end
+
+    if pose.handle and pose.handle.Parent and pose.originalCFrame then
+        pcall(function() pose.handle.CFrame = pose.originalCFrame end)
+    end
+
+    state.weaponPose = nil
+end
+
+local function applyWeaponPose(player)
+    clearWeaponPose(player)
+
+    local rigName, hand, character = getRigInfo(player)
+    if not rigName or not hand or not character then
+        return false, "Character/rig is not ready."
+    end
+
+    local accessory = findRifleAccessory(character)
+    if not accessory then
+        return false, "Rifle accessory not found. Equip catalog " .. GUARD_RIFLE_CATALOG_ID .. " on the ALT first."
+    end
+
+    local handle = accessory:FindFirstChild("Handle")
+    if not handle or not handle:IsA("BasePart") then
+        return false, "Rifle Handle not found."
+    end
+
+    local originalWeld = handle:FindFirstChild("AccessoryWeld")
+    local pose = {
+        accessory = accessory,
+        handle = handle,
+        originalCFrame = handle.CFrame,
+        originalWeld = originalWeld,
+    }
+
+    if originalWeld and originalWeld:IsA("Weld") then
+        pose.originalPart0 = originalWeld.Part0
+        pose.originalPart1 = originalWeld.Part1
+        pose.originalC0 = originalWeld.C0
+        pose.originalC1 = originalWeld.C1
+        pose.originalEnabled = originalWeld.Enabled
+        originalWeld.Enabled = false
+    end
+
+    local weld = Instance.new("Weld")
+    weld.Name = "AccountManagerWeaponPose"
+    weld.Part0 = hand
+    weld.Part1 = handle
+
+    -- Initial test offsets. These are intentionally easy to notice from MAIN.
+    -- Fine alignment comes after we confirm the weld is visible to another client.
+    if rigName == "R6" then
+        weld.C0 = CFrame.new(0, -0.85, -0.35) * CFrame.Angles(math.rad(-90), 0, math.rad(90))
+    else
+        weld.C0 = CFrame.new(0, -0.35, -0.55) * CFrame.Angles(math.rad(-90), 0, math.rad(90))
+    end
+
+    weld.C1 = CFrame.identity
+    weld.Parent = hand
+    pose.testWeld = weld
+    getBotState(player).weaponPose = pose
+
+    return true, rigName .. " | " .. accessory.Name
+end
+
 --// Commands
 
 local function addCommand(names, description, callback)
@@ -852,6 +995,29 @@ addCommand({ "help", "cmds", "commands" }, "Send the complete command list to Di
     if not sent then
         warn("[Account Manager] Could not send help to Discord.")
     end
+end)
+
+addCommand({ "rig", "rigtype" }, "Report the ALT rig type for R6/R15 compatibility testing.", function()
+    local rigName, hand = getRigInfo(LocalPlayer)
+    if not rigName then
+        replyToHost("Rig: character not ready.")
+        return
+    end
+    replyToHost("Rig: " .. rigName .. " | weapon hand: " .. (hand and hand.Name or "missing"))
+end)
+
+addCommand({ "weaponpose", "wp" }, "Test rifle positioning on the current R6/R15 rig.", function()
+    local ok, result = applyWeaponPose(LocalPlayer)
+    if ok then
+        replyToHost("Weapon pose active: " .. result .. ". Check the ALT from MAIN.")
+    else
+        replyToHost("Weapon pose failed: " .. tostring(result))
+    end
+end)
+
+addCommand({ "unweaponpose", "unwp" }, "Restore the rifle after the weapon-pose test.", function()
+    clearWeaponPose(LocalPlayer)
+    replyToHost("Weapon pose cleared.")
 end)
 
 addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
@@ -1126,6 +1292,7 @@ addCommand({ "reset", "kill", "oof", "die" }, "Reset managed accounts.", functio
         local bot = entry.player
         local humanoid = getHumanoid(bot)
 
+        clearWeaponPose(bot)
         stopBotMovement(bot)
 
         if humanoid then
