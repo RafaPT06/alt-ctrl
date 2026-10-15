@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.25.0
+    Account Manager v3.26.0
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.25.0"
+local VERSION = "3.26.0"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedCatalogAnimations = {}
@@ -198,6 +198,13 @@ local function getBotState(player)
             savedIdleWeight2 = nil,
             standObjects = nil,
             effects = {},
+            companion = {
+                enabled = false,
+                distance = 6,
+                side = "back",
+                idleLook = true,
+                speedMatch = true,
+            },
         }
     end
 
@@ -356,7 +363,28 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                 elseif distance <= stopRadius then
                     humanoid:Move(Vector3.zero)
                     pathWaypoints = nil
+
+                    if mode == "companion" then
+                        local companion = getBotState(player).companion
+                        if companion and companion.speedMatch then
+                            local targetHumanoid = getHumanoid(target)
+                            if targetHumanoid then humanoid.WalkSpeed = targetHumanoid.WalkSpeed end
+                        end
+                        if companion and companion.idleLook then
+                            local lookTarget = Vector3.new(targetRoot.Position.X, root.Position.Y, targetRoot.Position.Z)
+                            if (lookTarget - root.Position).Magnitude > 0.05 then
+                                root.CFrame = CFrame.lookAt(root.Position, lookTarget)
+                            end
+                        end
+                    end
                 else
+                    if mode == "companion" then
+                        local companion = getBotState(player).companion
+                        if companion and companion.speedMatch then
+                            local targetHumanoid = getHumanoid(target)
+                            if targetHumanoid then humanoid.WalkSpeed = targetHumanoid.WalkSpeed end
+                        end
+                    end
                     local now = tick()
                     if not lastPosition then
                         lastPosition = root.Position
@@ -1183,6 +1211,68 @@ addCommand({ "unfollow", "untrack", "unwatch", "standdown" }, "Stop follow/stand
     for _, entry in ipairs(getManagedBots()) do
         local state = getBotState(entry.player)
         if state.mode == "follow" or state.mode == "stand" then stopBotMovement(entry.player, true) end
+    end
+end)
+
+local function companionOffset(side, distance)
+    if side == "front" then return CFrame.new(0, 0, -distance) end
+    if side == "left" then return CFrame.new(-distance, 0, 0) end
+    if side == "right" then return CFrame.new(distance, 0, 0) end
+    return CFrame.new(0, 0, distance)
+end
+
+local function startCompanion(bot)
+    local host = refreshHost()
+    if not host then replyToHost("Host not found.") return end
+    local state = getBotState(bot)
+    state.companion = state.companion or { distance = 6, side = "back", idleLook = true, speedMatch = true }
+    state.companion.enabled = true
+    local token = beginBotMode(bot, "companion", host)
+    startNaturalFollow(bot, "companion", host, companionOffset(state.companion.side, state.companion.distance), 2.75, token)
+end
+
+addCommand({ "companion", "buddy" }, "Persistent companion mode. Usage: ,companion [distance N | side back/front/left/right | idle on/off | speedmatch on/off]", function(_, ...)
+    local args = { ... }
+    local sub = string.lower(tostring(args[1] or ""))
+    local value = string.lower(tostring(args[2] or ""))
+    local bots = getManagedBots()
+    if #bots == 0 then replyToHost("No managed accounts available.") return end
+
+    for _, entry in ipairs(bots) do
+        local bot = entry.player
+        local state = getBotState(bot)
+        state.companion = state.companion or { distance = 6, side = "back", idleLook = true, speedMatch = true }
+        local config = state.companion
+
+        if sub == "distance" then
+            local distance = tonumber(args[2])
+            if not distance then replyToHost("Usage: ,companion distance <2-30>") return end
+            config.distance = math.clamp(distance, 2, 30)
+        elseif sub == "side" then
+            if value ~= "back" and value ~= "front" and value ~= "left" and value ~= "right" then
+                replyToHost("Side must be back, front, left, or right.") return
+            end
+            config.side = value
+        elseif sub == "idle" then
+            if value ~= "on" and value ~= "off" then replyToHost("Usage: ,companion idle <on/off>") return end
+            config.idleLook = value == "on"
+        elseif sub == "speedmatch" then
+            if value ~= "on" and value ~= "off" then replyToHost("Usage: ,companion speedmatch <on/off>") return end
+            config.speedMatch = value == "on"
+        elseif sub ~= "" and sub ~= "on" then
+            replyToHost("Usage: ,companion [distance N | side back/front/left/right | idle on/off | speedmatch on/off]")
+            return
+        end
+
+        startCompanion(bot)
+    end
+end)
+
+addCommand({ "uncompanion", "unbuddy" }, "Disable persistent companion mode.", function()
+    for _, entry in ipairs(getManagedBots()) do
+        local state = getBotState(entry.player)
+        if state.companion then state.companion.enabled = false end
+        if state.mode == "companion" then stopBotMovement(entry.player, true) end
     end
 end)
 
