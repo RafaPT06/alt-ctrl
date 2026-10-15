@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.24.10
+    Account Manager v3.25.0
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24.10"
+local VERSION = "3.25.0"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedCatalogAnimations = {}
@@ -916,21 +916,6 @@ addCommand({ "index", "ingame", "online" }, "Send managed-account count to Disco
     end
 end)
 
-addCommand({ "meatballify", "meatball", "gwibard" }, "Run the existing meatballify script.", function()
-    local ok, err = pcall(function()
-        loadstring(
-            game:HttpGetAsync(
-                "https://new-cloudbin.koyeb.app/raw/eTNvTLkf.txt",
-                true
-            )
-        )()
-    end)
-
-    if not ok then
-        warn("[Account Manager] meatballify failed:", err)
-        replyToHost("Meatballify failed to load.")
-    end
-end)
 
 addCommand({ "end", "stop", "quit", "exit", "close" }, "Disable Account Manager commands.", function()
     if shutdownRuntime then shutdownRuntime() end
@@ -1301,114 +1286,16 @@ addCommand({ "unfloat", "unhover" }, "Stop hovering without stopping other movem
     stopEffect(LocalPlayer, "float")
 end)
 
-addCommand({ "crazyorbit", "spiral" }, "Spiral around a player.", function(_, targetArg, speedArg, radiusArg)
-    local target = findPlayer(targetArg or "me")
-    if not target then replyToHost("Target not found.") return end
-    local speed = math.clamp(tonumber(speedArg) or 24, 1, 100)
-    local radius = math.clamp(tonumber(radiusArg) or 7, 2, 30)
-    local token = beginBotMode(LocalPlayer, "crazyorbit", target)
-    task.spawn(function()
-        local angle = 0
-        while isModeActive(LocalPlayer, "crazyorbit", token) do
-            local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
-            if root and targetRoot then
-                local wave = math.sin(angle * 2) * 4
-                local changingRadius = radius + math.sin(angle * 1.5) * (radius * 0.4)
-                local destination = targetRoot.Position + Vector3.new(math.cos(angle) * changingRadius, 4 + wave, math.sin(angle) * changingRadius)
-                root.CFrame = CFrame.lookAt(destination, targetRoot.Position)
-            end
-            angle = angle + math.rad(speed)
-            task.wait(0.05)
-        end
-    end)
-end)
 
-addCommand({ "launch", "yeet" }, "Launch the alt upward. Usage: ,launch [power]", function(_, powerArg)
-    local root = getRoot(LocalPlayer)
-    if root then
-        local power = math.clamp(tonumber(powerArg) or 110, 25, 300)
-        root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, power, root.AssemblyLinearVelocity.Z)
-    end
-end)
 
-local savedReturnCFrame = nil
-addCommand({ "void" }, "Drop the alt far below the map.", function()
-    local root = getRoot(LocalPlayer)
-    if root then
-        savedReturnCFrame = root.CFrame
-        root.CFrame = root.CFrame - Vector3.new(0, 500, 0)
-    end
-end)
 
-addCommand({ "return", "returnpos" }, "Return from ,void.", function()
-    local root = getRoot(LocalPlayer)
-    if root and savedReturnCFrame then
-        root.CFrame = savedReturnCFrame
-        savedReturnCFrame = nil
-    end
-end)
 
-addCommand({ "clone", "copyavatar" }, "Copy a player's avatar appearance locally.", function(_, ...)
-    local target = resolveTargetFromArgs(...)
-    local humanoid = getHumanoid(LocalPlayer)
-    local targetHumanoid = target and getHumanoid(target)
-    if humanoid and targetHumanoid then
-        local ok, description = pcall(function() return targetHumanoid:GetAppliedDescription() end)
-        if ok and description then
-            local applied, err = pcall(function() humanoid:ApplyDescription(description) end)
-            if not applied then replyToHost("Avatar copy failed: " .. tostring(err)) end
-        end
-    end
-end)
-
-addCommand({ "copy", "mirror" }, "Mirror a player's movement and jumps.", function(_, ...)
-    local target = resolveTargetFromArgs(...)
-    if not target then return end
-    local token = beginBotMode(LocalPlayer, "copy", target)
-    task.spawn(function()
-        while isModeActive(LocalPlayer, "copy", token) do
-            local humanoid, targetHumanoid = getHumanoid(LocalPlayer), getHumanoid(target)
-            if humanoid and targetHumanoid then
-                humanoid:Move(targetHumanoid.MoveDirection, false)
-                if targetHumanoid.Jump then humanoid.Jump = true end
-            end
-            task.wait(0.05)
-        end
-    end)
-end)
-
-addCommand({ "uncopy", "unmirror" }, "Stop mirroring.", function()
-    if getBotState(LocalPlayer).mode == "copy" then stopBotMovement(LocalPlayer, true) end
-end)
 
 addCommand({ "syncdance" }, "Start a dance on this managed alt.", function(_, dance)
     dance = tostring(dance or "1")
     sendEmote(dance == "1" and "dance" or ("dance" .. dance))
 end)
 
-addCommand({ "dramatic" }, "Run a dramatic floating entrance.", function()
-    local host = refreshHost()
-    local root, hostRoot = getRoot(LocalPlayer), getRoot(host)
-    if not root or not hostRoot then return end
-    local token = beginBotMode(LocalPlayer, "dramatic", host)
-    task.spawn(function()
-        root.CFrame = hostRoot.CFrame * CFrame.new(0, 0, 5)
-        local started = tick()
-        while isModeActive(LocalPlayer, "dramatic", token) and tick() - started < 4 do
-            local currentRoot, currentHostRoot = getRoot(LocalPlayer), getRoot(host)
-            if currentRoot and currentHostRoot then
-                local elapsed = tick() - started
-                local height = math.min(elapsed * 2.5, 8)
-                local angle = elapsed * 2
-                local pos = (currentHostRoot.CFrame * CFrame.new(0, height, 5)).Position
-                currentRoot.CFrame = CFrame.new(pos) * CFrame.Angles(0, angle, 0)
-                currentRoot.AssemblyLinearVelocity = Vector3.zero
-            end
-            task.wait(0.03)
-        end
-        if isModeActive(LocalPlayer, "dramatic", token) then stopBotMovement(LocalPlayer) end
-    end)
-end)
 
 addCommand({ "players", "playerlist" }, "Print the server player list in the executor console.", function()
     print("=== Account Manager Players (" .. #Players:GetPlayers() .. ") ===")
@@ -1433,82 +1320,6 @@ addCommand({ "undance", "nodance", "nd", "stopdance" }, "Stop the current emote.
     end
 end)
 
---// Fun movement: shares the normal mode token, so switching modes cancels it.
-local function funNumber(value, default, minimum, maximum)
-    local number = tonumber(value)
-    if not number or number ~= number or math.abs(number) == math.huge then return default end
-    return math.clamp(number, minimum, maximum)
-end
-
-local function startFunMovement(mode, lockFacing, update)
-    local root, humanoid = getRoot(LocalPlayer), getHumanoid(LocalPlayer)
-    if not root or not humanoid or humanoid.Health <= 0 then
-        replyToHost("Character is not ready.")
-        return
-    end
-    if root.Anchored then
-        replyToHost("Use ,unfreeze before starting fun movement.")
-        return
-    end
-    stopBotMovement(LocalPlayer)
-    local token = beginBotMode(LocalPlayer, mode, nil)
-    local state = getBotState(LocalPlayer)
-    state.funHumanoid = humanoid
-    state.funAutoRotate = humanoid.AutoRotate
-    if lockFacing then humanoid.AutoRotate = false end
-    local initial = root.CFrame
-    local started = tick()
-    task.spawn(function()
-        local ok, err = pcall(function()
-            while isModeActive(LocalPlayer, mode, token) do
-                local currentRoot, currentHumanoid = getRoot(LocalPlayer), getHumanoid(LocalPlayer)
-                if currentRoot ~= root or currentHumanoid ~= humanoid
-                    or not root.Parent or humanoid.Health <= 0 or root.Anchored then break end
-                update(root, humanoid, tick() - started, initial)
-                task.wait(0.05)
-            end
-        end)
-        if isModeActive(LocalPlayer, mode, token) then stopBotMovement(LocalPlayer) end
-        if not ok then warn("[Account Manager] Fun movement failed:", mode, err) end
-    end)
-end
-
-addCommand({ "hop", "bunnyhop" }, "Keep hopping. Usage: ,hop [interval 0.4-5]", function(_, intervalArg)
-    local interval = funNumber(intervalArg, 1, 0.4, 5)
-    local nextHop = 0
-    startFunMovement("hop", false, function(_, humanoid, elapsed)
-        if elapsed >= nextHop then
-            nextHop = elapsed + interval
-            humanoid.Jump = true
-        end
-    end)
-end)
-
-addCommand({ "moonwalk" }, "Walk backward while facing forward. Stop with ,stopfun.", function()
-    startFunMovement("moonwalk", true, function(root, humanoid, _, initial)
-        local backward = Vector3.new(-initial.LookVector.X, 0, -initial.LookVector.Z)
-        if backward.Magnitude > 0.001 then humanoid:Move(backward.Unit, false) end
-        root.CFrame = CFrame.new(root.Position) * (initial - initial.Position)
-    end)
-end)
-
-addCommand({ "zigzag" }, "Walk in a zigzag. Usage: ,zigzag [period 0.5-5]", function(_, periodArg)
-    local period = funNumber(periodArg, 2, 0.5, 5)
-    startFunMovement("zigzag", false, function(_, humanoid, elapsed, initial)
-        local direction = initial.LookVector + initial.RightVector * math.sin(elapsed * math.pi * 2 / period)
-        direction = Vector3.new(direction.X, 0, direction.Z)
-        if direction.Magnitude > 0.001 then humanoid:Move(direction.Unit, false) end
-    end)
-end)
-
-addCommand({ "wiggle", "shimmy" }, "Wiggle in place. Usage: ,wiggle [degrees 5-60] [speed 0.5-6]", function(_, degreesArg, speedArg)
-    local degrees = funNumber(degreesArg, 25, 5, 60)
-    local speed = funNumber(speedArg, 2, 0.5, 6)
-    startFunMovement("wiggle", true, function(root, _, elapsed, initial)
-        root.CFrame = CFrame.new(root.Position) * (initial - initial.Position)
-            * CFrame.Angles(0, math.rad(degrees) * math.sin(elapsed * speed * math.pi * 2), 0)
-    end)
-end)
 
 addCommand({ "sit", "chill" }, "Sit down. Stop with ,unsit or ,stopfun.", function()
     local humanoid = getHumanoid(LocalPlayer)
@@ -1527,9 +1338,8 @@ addCommand({ "unsit", "getup" }, "Stand up from sitting.", function()
     if humanoid then humanoid.Sit = false end
 end)
 
-addCommand({ "stopfun", "unfun" }, "Stop hopping, moonwalking, zigzagging, wiggling, or sitting.", function()
-    local mode = getBotState(LocalPlayer).mode
-    if mode == "hop" or mode == "moonwalk" or mode == "zigzag" or mode == "wiggle" or mode == "sit" then
+addCommand({ "stopfun", "unfun" }, "Stop the current sitting/fun state.", function()
+    if getBotState(LocalPlayer).mode == "sit" then
         stopBotMovement(LocalPlayer)
     end
 end)
