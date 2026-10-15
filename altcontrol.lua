@@ -15,12 +15,8 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.24.6"
+local VERSION = "3.24.10"
 local STAND_ANIMATION_ID = "138791542100078"
-local GUARD_IDLE_ANIMATION_ID = "83061898886380"
-local GUARD_WALK_ANIMATION_ID = "98105137336279"
-local GUARD_RUN_ANIMATION_ID = "88321834888120"
-local GUARD_RIFLE_CATALOG_ID = "88720156730514"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedCatalogAnimations = {}
 
@@ -201,11 +197,6 @@ local function getBotState(player)
             savedIdleWeight1 = nil,
             savedIdleWeight2 = nil,
             standObjects = nil,
-            guardStyle = "tactical",
-            guardPoseJoints = nil,
-            guardAnimationTracks = nil,
-            guardAnimationState = nil,
-            weaponPose = nil,
             effects = {},
         }
     end
@@ -280,119 +271,6 @@ local function cleanupFunMovement(player)
     state.funSitting = nil
 end
 
-local function clearGuardPose(player)
-    local state = getBotState(player)
-    if state.guardPoseJoints then
-        for joint, original in pairs(state.guardPoseJoints) do
-            if joint and joint.Parent then
-                pcall(function() joint.Transform = original end)
-            end
-        end
-        state.guardPoseJoints = nil
-    end
-end
-
-local function setGuardPose(player, enabled)
-    local state = getBotState(player)
-    if not enabled or state.guardStyle ~= "tactical" then
-        clearGuardPose(player)
-        return
-    end
-    local character = player and player.Character
-    if not character then return end
-    if not state.guardPoseJoints then state.guardPoseJoints = {} end
-    local joints = state.guardPoseJoints
-    local right = character:FindFirstChild("RightShoulder", true) or character:FindFirstChild("Right Shoulder", true)
-    local left = character:FindFirstChild("LeftShoulder", true) or character:FindFirstChild("Left Shoulder", true)
-    if right and right:IsA("Motor6D") then
-        if joints[right] == nil then joints[right] = right.Transform end
-        right.Transform = CFrame.Angles(math.rad(-18), 0, math.rad(10))
-    end
-    if left and left:IsA("Motor6D") then
-        if joints[left] == nil then joints[left] = left.Transform end
-        left.Transform = CFrame.Angles(math.rad(-12), 0, math.rad(-12))
-    end
-end
-
-local function stopGuardAnimations(player)
-    local state = getBotState(player)
-    if state.guardAnimationTracks then
-        for _, track in pairs(state.guardAnimationTracks) do
-            if track then
-                pcall(function()
-                    track:Stop(0.15)
-                    track:Destroy()
-                end)
-            end
-        end
-        state.guardAnimationTracks = nil
-    end
-    state.guardAnimationState = nil
-end
-
-local function loadGuardAnimations(player)
-    stopGuardAnimations(player)
-    local humanoid = getHumanoid(player)
-    if not humanoid then return nil end
-    local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid:WaitForChild("Animator", 3)
-    if not animator then return nil end
-
-    local tracks = {}
-    local ids = {
-        idle = GUARD_IDLE_ANIMATION_ID,
-        walk = GUARD_WALK_ANIMATION_ID,
-        run = GUARD_RUN_ANIMATION_ID,
-    }
-    for name, catalogId in pairs(ids) do
-        local resolvedId = resolveCatalogAnimation(catalogId)
-        if resolvedId then
-            local animation = Instance.new("Animation")
-            animation.AnimationId = resolvedId
-            local ok, track = pcall(function() return animator:LoadAnimation(animation) end)
-            animation:Destroy()
-            if ok and track then
-                track.Looped = true
-                track.Priority = Enum.AnimationPriority.Action
-                tracks[name] = track
-                print("[Account Manager] Guard " .. name .. " loaded:", resolvedId)
-            else
-                warn("[Account Manager] Could not load resolved guard " .. name .. " animation:", track)
-            end
-        else
-            warn("[Account Manager] Could not resolve guard " .. name .. " catalog item:", catalogId)
-        end
-    end
-    getBotState(player).guardAnimationTracks = tracks
-    return tracks
-end
-
-local function playGuardAnimation(player, name)
-    local state = getBotState(player)
-    if state.guardStyle ~= "tactical" then
-        stopGuardAnimations(player)
-        return
-    end
-
-    -- Do not replay the same looping animation every movement update.
-    if state.guardAnimationState == name then
-        local current = state.guardAnimationTracks and state.guardAnimationTracks[name]
-        if current and current.IsPlaying then return end
-    end
-
-    local tracks = state.guardAnimationTracks or loadGuardAnimations(player)
-    if not tracks or not tracks[name] then return end
-    if state.guardAnimationState == name and tracks[name].IsPlaying then return end
-
-    for trackName, track in pairs(tracks) do
-        if trackName ~= name and track.IsPlaying then
-            track:Stop(0.2)
-        end
-    end
-
-    local track = tracks[name]
-    if not track.IsPlaying then track:Play(0.2, 1, 1) end
-    state.guardAnimationState = name
-end
 
 local function getEffectState(player, name)
     local state = getBotState(player)
@@ -449,7 +327,7 @@ end
 
 local isModeActive
 
-local function startNaturalFollow(player, mode, target, offset, stopRadius, token, useGuardPose)
+local function startNaturalFollow(player, mode, target, offset, stopRadius, token)
     task.spawn(function()
         local lastPosition = nil
         local lastProgressAt = tick()
@@ -469,7 +347,6 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                 local distance = (root.Position - desired.Position).Magnitude
 
                 if distance > 90 then
-                    if useGuardPose then playGuardAnimation(player, "run") end
                     root.CFrame = desired
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
@@ -479,17 +356,7 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                 elseif distance <= stopRadius then
                     humanoid:Move(Vector3.zero)
                     pathWaypoints = nil
-                    if useGuardPose then playGuardAnimation(player, "idle") end
                 else
-                    if useGuardPose then
-                        local speed = Vector3.new(root.AssemblyLinearVelocity.X, 0, root.AssemblyLinearVelocity.Z).Magnitude
-                        local currentGuardState = getBotState(player).guardAnimationState
-                        if currentGuardState == "run" then
-                            playGuardAnimation(player, speed < 10 and "walk" or "run")
-                        else
-                            playGuardAnimation(player, speed > 15 and "run" or "walk")
-                        end
-                    end
                     local now = tick()
                     if not lastPosition then
                         lastPosition = root.Position
@@ -532,20 +399,15 @@ local function startNaturalFollow(player, mode, target, offset, stopRadius, toke
                         humanoid:MoveTo(desired.Position)
                     end
                 end
-            else
-                if useGuardPose then stopGuardAnimations(player) end
             end
             task.wait(0.2)
         end
-        if useGuardPose then stopGuardAnimations(player) end
     end)
 end
 
 local function stopBotMovement(player, preserveEffects)
     cleanupFunMovement(player)
     if not preserveEffects then clearEffects(player) end
-    clearGuardPose(player)
-    stopGuardAnimations(player)
     local state = getBotState(player)
 
     state.token = state.token + 1
@@ -577,8 +439,6 @@ end
 
 local function beginBotMode(player, mode, target)
     cleanupFunMovement(player)
-    clearGuardPose(player)
-    stopGuardAnimations(player)
     local state = getBotState(player)
 
     if state.standAnimationTrack then
@@ -803,131 +663,6 @@ local function reportToDiscord(commandName, data)
     return false
 end
 
-
---// Rig / weapon-pose test
-
-local function getRigInfo(player)
-    local character, humanoid = getCharacter(player)
-    if not character or not humanoid then return nil, nil, nil end
-
-    local rigName = humanoid.RigType == Enum.HumanoidRigType.R6 and "R6" or "R15"
-    local hand = rigName == "R6"
-        and character:FindFirstChild("Right Arm")
-        or character:FindFirstChild("RightHand")
-
-    return rigName, hand, character
-end
-
-local function findRifleAccessory(character)
-    if not character then return nil end
-
-    local catalogId = GUARD_RIFLE_CATALOG_ID
-    local catalogNeedle = string.lower(catalogId)
-
-    for _, child in ipairs(character:GetChildren()) do
-        if child:IsA("Accessory") then
-            local handle = child:FindFirstChild("Handle")
-            if handle then
-                local name = string.lower(child.Name)
-                if string.find(name, "rifle", 1, true)
-                    or string.find(name, "gun", 1, true)
-                    or string.find(name, catalogNeedle, 1, true) then
-                    return child
-                end
-            end
-        end
-    end
-
-    -- Fallback: if the avatar only has one accessory with a Handle, use it
-    -- only when its mesh/texture metadata contains the configured catalog id.
-    for _, child in ipairs(character:GetChildren()) do
-        if child:IsA("Accessory") then
-            local handle = child:FindFirstChild("Handle")
-            if handle then
-                local mesh = handle:FindFirstChildOfClass("SpecialMesh")
-                local values = {
-                    handle:IsA("MeshPart") and handle.MeshId or "",
-                    handle:IsA("MeshPart") and handle.TextureID or "",
-                    mesh and mesh.MeshId or "",
-                    mesh and mesh.TextureId or "",
-                }
-                for _, value in ipairs(values) do
-                    if string.find(string.lower(tostring(value)), catalogNeedle, 1, true) then
-                        return child
-                    end
-                end
-            end
-        end
-    end
-
-    return nil
-end
-
-local function clearWeaponPose(player)
-    local state = getBotState(player)
-    local pose = state.weaponPose
-    if not pose then return end
-
-    local weld = pose.originalWeld
-    if weld and weld.Parent then
-        pcall(function()
-            weld.C0 = pose.originalC0
-            weld.C1 = pose.originalC1
-        end)
-    end
-
-    state.weaponPose = nil
-end
-
-local function applyWeaponPose(player)
-    clearWeaponPose(player)
-
-    local rigName, hand, character = getRigInfo(player)
-    if not rigName or not hand or not character then
-        return false, "Character/rig is not ready."
-    end
-
-    local accessory = findRifleAccessory(character)
-    if not accessory then
-        return false, "Rifle accessory not found. Equip catalog " .. GUARD_RIFLE_CATALOG_ID .. " on the ALT first."
-    end
-
-    local handle = accessory:FindFirstChild("Handle")
-    if not handle or not handle:IsA("BasePart") then
-        return false, "Rifle Handle not found."
-    end
-
-    -- IMPORTANT: do not disable/destroy the original AccessoryWeld and do not
-    -- create a second weld. This test changes only the existing accessory weld.
-    local weld = handle:FindFirstChild("AccessoryWeld")
-    if not weld or not weld:IsA("Weld") then
-        return false, "Existing AccessoryWeld not found on the rifle."
-    end
-
-    local pose = {
-        accessory = accessory,
-        handle = handle,
-        originalWeld = weld,
-        originalC0 = weld.C0,
-        originalC1 = weld.C1,
-    }
-    getBotState(player).weaponPose = pose
-
-    -- Large, obvious offset for the replication test. We intentionally leave
-    -- Part0/Part1 and all character Motor6Ds untouched.
-    if rigName == "R6" then
-        weld.C0 = pose.originalC0
-            * CFrame.new(1.5, 0.5, -1.25)
-            * CFrame.Angles(0, math.rad(90), 0)
-    else
-        weld.C0 = pose.originalC0
-            * CFrame.new(1.5, 0.5, -1.25)
-            * CFrame.Angles(0, math.rad(90), 0)
-    end
-
-    return true, rigName .. " | existing AccessoryWeld only | " .. accessory.Name
-end
-
 --// Commands
 
 local function addCommand(names, description, callback)
@@ -978,124 +713,6 @@ addCommand({ "help", "cmds", "commands" }, "Send the complete command list to Di
     if not sent then
         warn("[Account Manager] Could not send help to Discord.")
     end
-end)
-
-addCommand({ "rig", "rigtype" }, "Report the ALT rig type for R6/R15 compatibility testing.", function()
-    local rigName, hand = getRigInfo(LocalPlayer)
-    if not rigName then
-        replyToHost("Rig: character not ready.")
-        return
-    end
-    replyToHost("Rig: " .. rigName .. " | weapon hand: " .. (hand and hand.Name or "missing"))
-end)
-
-addCommand({ "weaponpose", "wp" }, "Test direct physical rifle control.", function()
-    local character = LocalPlayer.Character
-    if not character then
-        replyToHost("Character not ready.")
-        return
-    end
-
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid then
-        replyToHost("Humanoid not found.")
-        return
-    end
-
-    local accessory = findRifleAccessory(character)
-    if not accessory then
-        replyToHost("Rifle accessory not found.")
-        return
-    end
-
-    local handle = accessory:FindFirstChild("Handle")
-    if not handle or not handle:IsA("BasePart") then
-        replyToHost("Rifle Handle not found.")
-        return
-    end
-
-    local isR6 = humanoid.RigType == Enum.HumanoidRigType.R6
-    local hand = character:FindFirstChild(
-        isR6 and "Right Arm" or "RightHand"
-    )
-
-    if not hand then
-        replyToHost("Right hand/arm not found.")
-        return
-    end
-
-    local state = getBotState(LocalPlayer)
-
-    -- Cancel previous test loop.
-    if state.weaponPose then
-        state.weaponPose.active = false
-    end
-
-    local pose = {
-        active = true,
-        handle = handle,
-        hand = hand
-    }
-
-    state.weaponPose = pose
-
-    handle.Anchored = false
-    handle.CanCollide = false
-    handle.Massless = true
-
-    task.spawn(function()
-        while running
-            and pose.active
-            and state.weaponPose == pose
-            and handle.Parent
-            and hand.Parent do
-
-            -- Keep the physical Handle awake/moving.
-            handle.AssemblyLinearVelocity = Vector3.new(0, 25, 0)
-            handle.AssemblyAngularVelocity = Vector3.zero
-
-            local offset
-
-            if isR6 then
-                offset =
-                    CFrame.new(0, -0.8, -0.8)
-                    * CFrame.Angles(
-                        math.rad(-90),
-                        0,
-                        math.rad(90)
-                    )
-            else
-                offset =
-                    CFrame.new(0, -0.35, -0.7)
-                    * CFrame.Angles(
-                        math.rad(-90),
-                        0,
-                        math.rad(90)
-                    )
-            end
-
-            handle.CFrame = hand.CFrame * offset
-
-            task.wait()
-        end
-    end)
-
-    replyToHost(
-        "Direct weapon test active ("
-        .. (isR6 and "R6" or "R15")
-        .. "). Check ALT + MAIN."
-    )
-end)
-
-addCommand({ "unweaponpose", "unwp" }, "Stop direct rifle control.", function()
-    local state = getBotState(LocalPlayer)
-
-    if state.weaponPose then
-        state.weaponPose.active = false
-        state.weaponPose = nil
-    end
-
-    replyToHost("Direct weapon test stopped.")
 end)
 
 addCommand({ "animid", "standanim" }, "Resolve the Angel stand animation ID.", function()
@@ -1370,7 +987,6 @@ addCommand({ "reset", "kill", "oof", "die" }, "Reset managed accounts.", functio
         local bot = entry.player
         local humanoid = getHumanoid(bot)
 
-        clearWeaponPose(bot)
         stopBotMovement(bot)
 
         if humanoid then
@@ -1656,7 +1272,7 @@ addCommand({ "unface", "unstare" }, "Stop facing without stopping other movement
     stopEffect(LocalPlayer, "face")
 end)
 
-addCommand({ "float", "hover" }, "Add a hover height to follow/guard, or hover above a player. Usage: ,float [player] [height]", function(_, ...)
+addCommand({ "float", "hover" }, "Add a hover height to follow, or hover above a player. Usage: ,float [player] [height]", function(_, ...)
     local args = { ... }
     local height = tonumber(args[#args])
     if height then table.remove(args, #args) else height = 8 end
@@ -1667,8 +1283,8 @@ addCommand({ "float", "hover" }, "Add a hover height to follow/guard, or hover a
     task.spawn(function()
         while isEffectActive(LocalPlayer, "float", token) do
             local state = getBotState(LocalPlayer)
-            -- Follow/guard consume this effect as a vertical offset themselves.
-            if state.mode ~= "follow" and state.mode ~= "guard" then
+            -- Follow consumes this effect as a vertical offset itself.
+            if state.mode ~= "follow" then
                 local root, targetRoot = getRoot(LocalPlayer), getRoot(target)
                 if root and targetRoot and not root.Anchored then
                     local position = targetRoot.Position + Vector3.new(0, height, 0)
@@ -1683,34 +1299,6 @@ end)
 
 addCommand({ "unfloat", "unhover" }, "Stop hovering without stopping other movement.", function()
     stopEffect(LocalPlayer, "float")
-end)
-
-addCommand({ "guard", "bodyguard" }, "Guard a player from a tactical rear-right position.", function(_, ...)
-    local target = resolveTargetFromArgs(...)
-    if not target then return end
-    local token = beginBotMode(LocalPlayer, "guard", target)
-    startNaturalFollow(LocalPlayer, "guard", target, CFrame.new(3, 0, 3.5), 2.5, token, true)
-end)
-
-addCommand({ "guardstyle" }, "Set guard idle style. Usage: ,guardstyle tactical/normal", function(_, styleArg)
-    local style = string.lower(tostring(styleArg or ""))
-    if style ~= "tactical" and style ~= "normal" then
-        replyToHost("Usage: ,guardstyle tactical/normal")
-        return
-    end
-    local state = getBotState(LocalPlayer)
-    state.guardStyle = style
-    clearGuardPose(LocalPlayer)
-    if style == "normal" then
-        stopGuardAnimations(LocalPlayer)
-    elseif getBotState(LocalPlayer).mode == "guard" then
-        loadGuardAnimations(LocalPlayer)
-    end
-    replyToHost("Guard style set to " .. style .. ".")
-end)
-
-addCommand({ "unguard", "stopguard" }, "Stop guarding.", function()
-    if getBotState(LocalPlayer).mode == "guard" then stopBotMovement(LocalPlayer, true) end
 end)
 
 addCommand({ "crazyorbit", "spiral" }, "Spiral around a player.", function(_, targetArg, speedArg, radiusArg)
