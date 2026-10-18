@@ -92,6 +92,7 @@ end
 
 local running = true
 local shutdownRuntime = nil
+local stopRemoteControl = nil
 local runtimeEnvironment = _G
 if type(getgenv) == "function" then
     local ok, environment = pcall(getgenv)
