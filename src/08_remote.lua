@@ -3,12 +3,14 @@
 local REMOTE_SYNC_ENDPOINT = "https://meowz.up.railway.app/api/account-manager/remote/sync"
 local REMOTE_SYNC_INTERVAL = 2.5
 local remoteActive = false
-local remoteLogs = {}
 local remoteResults = {}
 local remoteSeen = {}
+local remoteSeenOrder = {}
 
 local function remoteRequest()
-    return request or http_request
+    if type(request) == "function" then return request end
+    if type(http_request) == "function" then return http_request end
+    return nil
 end
 
 local function push(list, value, limit)
@@ -16,11 +18,28 @@ local function push(list, value, limit)
     while #list > limit do table.remove(list, 1) end
 end
 
-local function telemetry()
+local function remoteTimestamp()
+    return os.time() * 1000
+end
+
+local function rememberCommand(id)
+    if remoteSeen[id] then return false end
+    remoteSeen[id] = true
+    table.insert(remoteSeenOrder, id)
+    while #remoteSeenOrder > 500 do
+        local oldest = table.remove(remoteSeenOrder, 1)
+        remoteSeen[oldest] = nil
+    end
+    return true
+end
+
+local function telemetry(results)
     local state = getBotState(LocalPlayer)
     local humanoid = getHumanoid(LocalPlayer)
     local effects = {}
-    for name in pairs(state.effects or {}) do effects[tostring(name)] = true end
+    for name, effect in pairs(state.effects or {}) do
+        if effect then effects[tostring(name)] = true end
+    end
     return {
         altUserId = LocalPlayer.UserId,
         version = VERSION,
@@ -32,8 +51,8 @@ local function telemetry()
         placeId = tostring(game.PlaceId),
         jobId = tostring(game.JobId or ""),
         hostPresent = refreshHost() ~= nil,
-        logs = remoteLogs,
-        results = remoteResults,
+        logs = {},
+        results = results or {},
     }
 end
 
@@ -41,30 +60,38 @@ local function syncRemote()
     local token = tostring(runtimeEnvironment.ACCOUNT_MANAGER_ALT_TOKEN or "")
     local send = remoteRequest()
     if token == "" or type(send) ~= "function" then return false end
+
+    local sentResults = remoteResults
     local ok, response = pcall(send, {
         Url = REMOTE_SYNC_ENDPOINT,
         Method = "POST",
-        Headers = { ["Content-Type"] = "application/json", Authorization = "Bearer " .. token },
-        Body = HttpService:JSONEncode(telemetry()),
+        Headers = {
+            ["Content-Type"] = "application/json",
+            ["Authorization"] = "Bearer " .. token,
+        },
+        Body = HttpService:JSONEncode(telemetry(sentResults)),
     })
     if not ok or type(response) ~= "table" then return false end
+
     local status = tonumber(response.StatusCode or response.Status or 0) or 0
     if status < 200 or status >= 300 then return false end
-    local decoded, body = pcall(HttpService.JSONDecode, HttpService, tostring(response.Body or "{}"))
+
+    local decoded, body = pcall(HttpService.JSONDecode, HttpService, tostring(response.Body or response.body or "{}"))
     if not decoded or type(body) ~= "table" or body.ok ~= true then return false end
-    remoteLogs, remoteResults = {}, {}
+
+    if remoteResults == sentResults then remoteResults = {} end
+
     for _, item in ipairs(type(body.commands) == "table" and body.commands or {}) do
-        local id = tonumber(item.id)
-        local command = tostring(item.command or "")
-        if id and command ~= "" and not remoteSeen[id] then
-            remoteSeen[id] = true
+        local id = math.floor(tonumber(item.id) or 0)
+        local command = type(item.command) == "string" and item.command or ""
+        if id > 0 and command ~= "" and rememberCommand(id) then
             local commandOk, commandError = processCommand(command)
             push(remoteResults, {
                 id = id,
                 ok = commandOk == true,
-                error = commandOk and "" or tostring(commandError or "command_failed"),
-                completedAt = os.time(),
-            }, 50)
+                error = commandOk and "" or tostring(commandError or "command_failed"):sub(1, 500),
+                completedAt = remoteTimestamp(),
+            }, 100)
         end
     end
     return true
@@ -80,6 +107,7 @@ local function startRemoteControl()
         warn("[Account Manager] Remote control disabled: request/http_request is unavailable.")
         return
     end
+
     remoteActive = true
     task.spawn(function()
         while running and remoteActive do
@@ -90,10 +118,14 @@ local function startRemoteControl()
     end)
 end
 
-local function stopRemoteControl()
+stopRemoteControl = function()
     remoteActive = false
 end
 
 local function getRemoteState()
-    return { enabled = remoteActive, queuedResults = #remoteResults, seenCommands = remoteSeen }
+    return {
+        enabled = remoteActive,
+        queuedResults = #remoteResults,
+        seenCommands = #remoteSeenOrder,
+    }
 end
