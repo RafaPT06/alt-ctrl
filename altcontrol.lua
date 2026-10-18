@@ -1709,14 +1709,19 @@ end)
 -- send ,end to stop those once before loading this release.
 shutdownRuntime = function()
     if not running then return end
+
     running = false
-    if hostChatConnection then hostChatConnection:Disconnect() hostChatConnection = nil end
+
+    if hostChatConnection then
+        hostChatConnection:Disconnect()
+        hostChatConnection = nil
+    end
+
     playerAddedConnection:Disconnect()
     playerRemovingConnection:Disconnect()
+
     stopAllMovement()
-    stopRing()
-    if godModeEnabled then commands.ungod() end
-    if godConnection then godConnection:Disconnect() godConnection = nil end
+
     if runtimeEnvironment[RUNTIME_KEY] == runtimeHandle then
         runtimeEnvironment[RUNTIME_KEY] = nil
     end
