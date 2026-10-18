@@ -2,8 +2,7 @@
     Account Manager modular loader
 
     The implementation lives under /src and is downloaded as separate files.
-    The files are concatenated before execution so the existing v3.27.0 lexical
-    scope and behaviour stay exactly the same.
+    The files are concatenated before execution so the existing lexical scope is shared.
 ]]
 
 local environment = _G
@@ -25,6 +24,7 @@ local SOURCE_FILES = {
     "src/commands/05_flex_fun.lua",
     "src/06_dispatcher.lua",
     "src/07_host_listener.lua",
+    "src/08_remote.lua",
     "src/08_startup.lua",
 }
 

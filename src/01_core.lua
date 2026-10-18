@@ -1,5 +1,5 @@
 --[[
-    Account Manager v3.27.0
+    Account Manager v3.28.0
     Modified by Rafa
 
     Clean rewrite of the original Account Manager.
@@ -15,7 +15,7 @@
 --// Configuration
 
 local PREFIX = ","
-local VERSION = "3.27.0"
+local VERSION = "3.28.0"
 local STAND_ANIMATION_ID = "138791542100078"
 local REPORT_ENDPOINT = "https://meowz.up.railway.app/api/account-manager"
 local resolvedCatalogAnimations = {}
@@ -92,6 +92,7 @@ end
 
 local running = true
 local shutdownRuntime = nil
+local stopRemoteControl = nil
 local runtimeEnvironment = _G
 if type(getgenv) == "function" then
     local ok, environment = pcall(getgenv)
@@ -281,7 +282,6 @@ local function cleanupFunMovement(player)
     state.funAutoRotate = nil
     state.funSitting = nil
 end
-
 
 local function getEffectState(player, name)
     local state = getBotState(player)
@@ -498,4 +498,3 @@ isModeActive = function(player, mode, token)
         and state.mode == mode
         and state.token == token
 end
-

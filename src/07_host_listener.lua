@@ -29,9 +29,6 @@ local function connectHostListener()
         return true
     end
 
-    -- LegacyChatService:
-    -- Host.Chatted was tested directly in this experience and receives
-    -- the host's public chat messages reliably.
     local hostPlayer = refreshHost()
     if not hostPlayer then
         warn("[Account Manager] Host is not present; waiting for host to join.")
@@ -40,7 +37,6 @@ local function connectHostListener()
 
     hostChatConnection = hostPlayer.Chatted:Connect(function(input)
         input = tostring(input or "")
-
         if input:sub(1, #PREFIX) == PREFIX then
             print("[Account Manager] Command from host:", input)
             processCommand(input)
@@ -51,13 +47,11 @@ local function connectHostListener()
     return true
 end
 
--- Keep Host current if the main leaves/rejoins the same server.
 local playerAddedConnection = Players.PlayerAdded:Connect(function(player)
     if not running then return end
     if player.UserId == HOST_USER_ID then
         Host = player
         print("[Account Manager] Host joined: " .. player.Name)
-
         if not usingTextChatService() then
             task.defer(function()
                 if running then connectHostListener() end
@@ -74,12 +68,13 @@ local playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
     end
 end)
 
--- One active instance per executor environment. Older releases have no handle;
--- send ,end to stop those once before loading this release.
 shutdownRuntime = function()
     if not running then return end
-
     running = false
+
+    if type(stopRemoteControl) == "function" then
+        pcall(stopRemoteControl)
+    end
 
     if hostChatConnection then
         hostChatConnection:Disconnect()
@@ -88,11 +83,9 @@ shutdownRuntime = function()
 
     playerAddedConnection:Disconnect()
     playerRemovingConnection:Disconnect()
-
     stopAllMovement()
 
     if runtimeEnvironment[RUNTIME_KEY] == runtimeHandle then
         runtimeEnvironment[RUNTIME_KEY] = nil
     end
 end
-

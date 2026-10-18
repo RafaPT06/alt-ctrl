@@ -11,12 +11,16 @@ local function parseArguments(text)
 end
 
 local function processCommand(input)
-    if not running or type(input) ~= "string" then
-        return
+    if not running then
+        return false, "runtime_stopped"
+    end
+
+    if type(input) ~= "string" then
+        return false, "invalid_input"
     end
 
     if string.sub(input, 1, #PREFIX) ~= PREFIX then
-        return
+        return false, "missing_prefix"
     end
 
     startedAt = tick()
@@ -25,15 +29,16 @@ local function processCommand(input)
     local args = parseArguments(body)
 
     if #args == 0 then
-        return
+        return false, "empty_command"
     end
 
     local commandName = string.lower(args[1])
     local callback = commands[commandName]
 
     if not callback then
-        replyToHost('Command "' .. commandName .. '" not found.')
-        return
+        local message = 'Command "' .. commandName .. '" not found.'
+        replyToHost(message)
+        return false, "command_not_found"
     end
 
     local ok, err = pcall(function()
@@ -41,12 +46,11 @@ local function processCommand(input)
     end)
 
     if not ok then
-        warn(
-            "[Account Manager] Command failed:",
-            commandName,
-            err
-        )
+        warn("[Account Manager] Command failed:", commandName, err)
         replyToHost('Command "' .. commandName .. '" failed: ' .. tostring(err))
+        return false, tostring(err)
     end
+
+    return true, nil
 end
 
